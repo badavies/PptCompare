@@ -36,9 +36,11 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
 
     private readonly string _settingsDirectory;
     private readonly string _settingsPath;
+    private readonly IApplicationDiagnostics _diagnostics;
 
-    public JsonApplicationSettingsService()
+    public JsonApplicationSettingsService(IApplicationDiagnostics? diagnostics = null)
     {
+        _diagnostics = diagnostics ?? NullApplicationDiagnostics.Instance;
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localAppData))
         {
@@ -62,6 +64,7 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
             if (file.Length is <= 0 or > MaxSettingsFileBytes)
             {
                 Debug.WriteLine("PptCompare settings were ignored because the file size was invalid.");
+                _diagnostics.RecordEvent("SettingsReset", "reason=invalid-size");
                 return new ApplicationSettings();
             }
 
@@ -76,6 +79,7 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
             if (!ApplicationSettings.TryValidate(settings, out var validationError))
             {
                 Debug.WriteLine($"PptCompare settings were ignored: {validationError}");
+                _diagnostics.RecordEvent("SettingsReset", "reason=invalid-values");
                 return new ApplicationSettings();
             }
 
@@ -84,6 +88,7 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
         catch (Exception exception) when (IsExpectedPersistenceException(exception))
         {
             Debug.WriteLine($"PptCompare settings could not be loaded: {exception.GetType().Name}");
+            _diagnostics.RecordException("SettingsLoadFailed", exception);
             return new ApplicationSettings();
         }
     }
@@ -122,6 +127,7 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
         }
         catch (Exception exception) when (IsExpectedPersistenceException(exception))
         {
+            _diagnostics.RecordException("SettingsSaveFailed", exception);
             throw new SettingsPersistenceException(
                 "The settings could not be saved. Check that your user profile is available and try again.",
                 exception);
@@ -130,7 +136,7 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
         {
             if (temporaryPath is not null)
             {
-                TryDeleteTemporaryFile(temporaryPath);
+                TryDeleteTemporaryFile(temporaryPath, _diagnostics);
             }
         }
     }
@@ -139,7 +145,7 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
         exception is IOException or UnauthorizedAccessException or JsonException or NotSupportedException or
             SecurityException or ArgumentException;
 
-    private static void TryDeleteTemporaryFile(string path)
+    private static void TryDeleteTemporaryFile(string path, IApplicationDiagnostics diagnostics)
     {
         try
         {
@@ -148,6 +154,7 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException)
         {
             Debug.WriteLine($"A temporary PptCompare settings file could not be removed: {exception.GetType().Name}");
+            diagnostics.RecordException("SettingsTemporaryFileCleanupFailed", exception);
         }
     }
 }
