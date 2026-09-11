@@ -1,0 +1,78 @@
+<Window x:Class="PptCompare.AboutWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="About PptCompare"
+        Width="600"
+        Height="690"
+        MinWidth="540"
+        MinHeight="600"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
+    <DockPanel Background="#F5F7FB">
+        <Border DockPanel.Dock="Top" Background="#2C4697" Padding="24,22">
+            <StackPanel Orientation="Horizontal">
+                <Image Source="Assets/PptCompareIcon.png" Width="72" Height="72"
+                       RenderOptions.BitmapScalingMode="HighQuality" Margin="0,0,18,0" />
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="PptCompare" Foreground="White" FontSize="27" FontWeight="SemiBold" />
+                    <TextBlock x:Name="VersionText" Foreground="#DCE5FF" FontSize="13" Margin="0,4,0,0" />
+                    <TextBlock Text="Presentation version review" Foreground="#DCE5FF" FontSize="12" Margin="0,2,0,0" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <Border DockPanel.Dock="Bottom" Background="White" BorderBrush="#D8DEE9" BorderThickness="0,1,0,0" Padding="18,12">
+            <Grid>
+                <TextBlock Text="© 2026 Ben Davies" VerticalAlignment="Center" Foreground="#68758D" />
+                <Button Content="Close" IsDefault="True" IsCancel="True" HorizontalAlignment="Right"
+                        Padding="22,7" Background="#2CA02C" BorderBrush="#2CA02C" Foreground="White" />
+            </Grid>
+        </Border>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24,18">
+            <StackPanel>
+                <TextBlock Text="About" FontSize="18" FontWeight="SemiBold" />
+                <TextBlock Text="PptCompare compares two PowerPoint presentations locally, showing text, formatting, tables, images, shapes and reordered slides side by side."
+                           TextWrapping="Wrap" Margin="0,7,0,14" Foreground="#43506A" />
+
+                <Border Background="White" BorderBrush="#D8DEE9" BorderThickness="1" CornerRadius="7" Padding="16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="155" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="Software designer" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock Grid.Column="1" Text="Ben Davies" Margin="0,3" />
+                        <TextBlock Grid.Row="1" Text="Version" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock x:Name="DetailVersionText" Grid.Row="1" Grid.Column="1" Margin="0,3" />
+                        <TextBlock Grid.Row="2" Text="Platform" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock x:Name="PlatformText" Grid.Row="2" Grid.Column="1" Margin="0,3" />
+                        <TextBlock Grid.Row="3" Text="Supported files" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" Text=".pptx and .pptm" Margin="0,3" />
+                    </Grid>
+                </Border>
+
+                <TextBlock Text="Privacy and security" FontSize="18" FontWeight="SemiBold" Margin="0,18,0,7" />
+                <TextBlock Text="Presentations are processed on this computer and are not uploaded by PptCompare. The application has no telemetry. PowerPoint files are opened read-only and macros are disabled. High-fidelity preview images are temporary and are removed during normal shutdown; abandoned preview folders are removed automatically after 24 hours."
+                           TextWrapping="Wrap" Foreground="#43506A" />
+
+                <TextBlock Text="Diagnostics" FontSize="18" FontWeight="SemiBold" Margin="0,18,0,7" />
+                <TextBlock Text="Small rolling diagnostic logs are stored locally. They record application events, version information and exception types, but never presentation names, paths, slide text or image contents."
+                           TextWrapping="Wrap" Foreground="#43506A" />
+                <TextBlock x:Name="DiagnosticsLocationText" TextWrapping="Wrap" FontFamily="Consolas"
+                           Foreground="#43506A" Margin="0,8,0,10" />
+                <Button Content="Copy technical details" HorizontalAlignment="Left" Padding="14,7"
+                        Click="CopyTechnicalDetails_OnClick" />
+
+                <TextBlock Text="Microsoft PowerPoint is optional. When available it is used for high-fidelity preview images; otherwise the built-in preview remains available."
+                           TextWrapping="Wrap" Foreground="#68758D" Margin="0,18,0,0" />
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

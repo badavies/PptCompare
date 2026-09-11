@@ -34,6 +34,9 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button Content="About" Command="{Binding AboutCommand}"
+                            Margin="0,0,10,0" Padding="14,8" Background="#243B82"
+                            BorderBrush="#7087CD" Foreground="White" />
                     <Button Content="Settings" Command="{Binding SettingsCommand}"
                             Margin="0,0,10,0" Padding="14,8" Background="#243B82"
                             BorderBrush="#7087CD" Foreground="White" />
@@ -48,7 +51,7 @@
             </StatusBarItem>
             <Separator />
             <StatusBarItem HorizontalAlignment="Right">
-                <TextBlock Text="Open XML and SharePoint connectors ready for implementation" Foreground="{StaticResource MutedBrush}" />
+                <TextBlock Text="Local comparison • .pptx and .pptm • PowerPoint optional" Foreground="{StaticResource MutedBrush}" />
             </StatusBarItem>
         </StatusBar>
 

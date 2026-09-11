@@ -15,12 +15,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IPresentationSourceService _presentationSource;
     private readonly IPresentationComparisonService _comparisonService;
     private readonly IPresentationRenderer _renderer;
+    private readonly IApplicationDiagnostics _diagnostics;
     private readonly IApplicationSettingsService _settingsService;
     private readonly ISettingsDialogService _settingsDialog;
+    private readonly IAboutDialogService _aboutDialog;
     private readonly AsyncRelayCommand _openPresentationCommand;
     private readonly AsyncRelayCommand _compareCommand;
     private readonly AsyncRelayCommand _swapSidesCommand;
     private readonly RelayCommand _settingsCommand;
+    private readonly RelayCommand _aboutCommand;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private LoadedPresentation? _leftPresentation;
     private LoadedPresentation? _rightPresentation;
@@ -46,23 +49,29 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         IPresentationSourceService presentationSource,
         IPresentationComparisonService comparisonService,
         IPresentationRenderer renderer,
+        IApplicationDiagnostics diagnostics,
         IApplicationSettingsService settingsService,
         ISettingsDialogService settingsDialog,
+        IAboutDialogService aboutDialog,
         ApplicationSettings settings)
     {
         ArgumentNullException.ThrowIfNull(filePicker);
         ArgumentNullException.ThrowIfNull(presentationSource);
         ArgumentNullException.ThrowIfNull(comparisonService);
         ArgumentNullException.ThrowIfNull(renderer);
+        ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(settingsService);
         ArgumentNullException.ThrowIfNull(settingsDialog);
+        ArgumentNullException.ThrowIfNull(aboutDialog);
         ArgumentNullException.ThrowIfNull(settings);
         _filePicker = filePicker;
         _presentationSource = presentationSource;
         _comparisonService = comparisonService;
         _renderer = renderer;
+        _diagnostics = diagnostics;
         _settingsService = settingsService;
         _settingsDialog = settingsDialog;
+        _aboutDialog = aboutDialog;
         _settings = settings;
         _outputTextFontSize = PointsToDeviceIndependentPixels(settings.OutputFontSizePoints);
 
@@ -83,6 +92,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => !_isBusy,
             HandleUnexpectedCommandException);
         _settingsCommand = new RelayCommand(OpenSettings, _ => !_isBusy);
+        _aboutCommand = new RelayCommand(OpenAbout, _ => !_isBusy);
     }
 
     public ObservableCollection<VersionDescriptor> LeftVersions { get; }
@@ -171,6 +181,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public ICommand CompareCommand => _compareCommand;
     public ICommand SwapSidesCommand => _swapSidesCommand;
     public ICommand SettingsCommand => _settingsCommand;
+    public ICommand AboutCommand => _aboutCommand;
 
     private async Task OpenPresentationAsync(object? parameter)
     {
@@ -201,6 +212,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var loaded = await _presentationSource.LoadAsync(
                 new PresentationReference(path, fileName),
                 _lifetimeCancellation.Token);
+            _diagnostics.RecordEvent("PresentationLoaded", $"slides={loaded.Slides.Count}");
 
             if (string.Equals(side, "Left", StringComparison.OrdinalIgnoreCase))
             {
@@ -227,6 +239,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         catch (PresentationLoadException exception)
         {
+            _diagnostics.RecordException("PresentationLoadRejected", exception);
             StatusMessage = exception.Message;
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
@@ -262,6 +275,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             ApplyComparisonResult(result);
             _hasCompared = true;
+            _diagnostics.RecordEvent(
+                "ComparisonCompleted",
+                $"changed={result.ChangedSlides};moved={result.MovedSlides};added={result.AddedSlides};removed={result.RemovedSlides}");
             StatusMessage =
                 $"Comparison complete — {result.ChangedSlides} changed, {result.MovedSlides} moved, {result.AddedSlides} added, {result.RemovedSlides} removed.";
         }
@@ -379,7 +395,24 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         catch (SettingsPersistenceException exception)
         {
             Debug.WriteLine(exception);
+            _diagnostics.RecordException("SettingsCommandFailed", exception);
             StatusMessage = exception.Message;
+        }
+        catch (Exception exception)
+        {
+            HandleUnexpectedCommandException(exception);
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "A UI command boundary must convert unexpected dialog errors into a safe status message.")]
+    private void OpenAbout(object? parameter)
+    {
+        try
+        {
+            _aboutDialog.ShowAbout();
         }
         catch (Exception exception)
         {
@@ -610,6 +643,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         catch (Exception exception)
         {
             Debug.WriteLine(exception);
+            _diagnostics.RecordException("BackgroundPreviewFailed", exception);
             if (!_disposed && !_isBusy)
             {
                 StatusMessage = "The PowerPoint preview was unavailable; the built-in preview remains ready.";
@@ -668,13 +702,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _compareCommand.RaiseCanExecuteChanged();
         _swapSidesCommand.RaiseCanExecuteChanged();
         _settingsCommand.RaiseCanExecuteChanged();
+        _aboutCommand.RaiseCanExecuteChanged();
     }
 
     private void HandleUnexpectedCommandException(Exception exception)
     {
         StatusMessage =
             "An unexpected error occurred. The operation was stopped and no presentation was modified.";
-        System.Diagnostics.Debug.WriteLine(exception);
+        _diagnostics.RecordException("CommandFailed", exception);
+        Debug.WriteLine(exception);
     }
 
     public void Dispose()

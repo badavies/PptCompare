@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Security;
 using PptCompare.Models;
 
 namespace PptCompare.Services;
@@ -14,12 +15,39 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     private const long MaxRenderedImageBytes = 50L * 1024 * 1024;
     private const long MaxRenderedPresentationBytes = 500L * 1024 * 1024;
     private static readonly TimeSpan RenderTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan StaleRenderFolderAge = TimeSpan.FromHours(24);
     private readonly object _renderFolderGate = new();
     private readonly SemaphoreSlim _renderSemaphore = new(1, 1);
     private readonly Queue<string> _renderFolders = new();
-    private readonly string _renderRoot = Path.GetFullPath(
-        Path.Combine(Path.GetTempPath(), "PptCompare", "renders"));
+    private readonly IApplicationDiagnostics _diagnostics;
+    private readonly string _renderRoot;
+    private readonly TimeProvider _timeProvider;
     private bool _disposed;
+
+    public PowerPointPresentationRenderer()
+        : this(NullApplicationDiagnostics.Instance)
+    {
+    }
+
+    public PowerPointPresentationRenderer(IApplicationDiagnostics diagnostics)
+        : this(
+            diagnostics,
+            Path.Combine(Path.GetTempPath(), "PptCompare", "renders"),
+            TimeProvider.System)
+    {
+    }
+
+    internal PowerPointPresentationRenderer(
+        IApplicationDiagnostics diagnostics,
+        string renderRoot,
+        TimeProvider timeProvider)
+    {
+        _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
+        ArgumentException.ThrowIfNullOrWhiteSpace(renderRoot);
+        _renderRoot = Path.GetFullPath(renderRoot);
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        CleanupStaleRenderFolders();
+    }
 
     public async Task<SlideRenderingResult> RenderAsync(
         string presentationPath,
@@ -68,6 +96,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 renderCancellation.Cancel();
                 Debug.WriteLine(
                     $"PowerPoint rendering timed out after {RenderTimeout.TotalSeconds:N0} seconds.");
+                _diagnostics.RecordEvent("PreviewRenderTimedOut");
                 return new SlideRenderingResult(
                     new Dictionary<int, string>(),
                     "PowerPoint rendering timed out; using the built-in slide preview.");
@@ -142,6 +171,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 exception is COMException or IOException or UnauthorizedAccessException)
             {
                 Debug.WriteLine($"Whole-presentation PowerPoint export failed: {exception}");
+                _diagnostics.RecordException("PreviewBulkExportFailed", exception);
                 images = [];
             }
 
@@ -174,6 +204,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         catch (Exception exception)
         {
             Debug.WriteLine($"PowerPoint rendering failed: {exception}");
+            _diagnostics.RecordException("PreviewRenderFailed", exception);
             completion.TrySetResult(new SlideRenderingResult(
                 new Dictionary<int, string>(),
                 GetRenderingFailureStatus(exception)));
@@ -272,7 +303,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         return images;
     }
 
-    private static Dictionary<int, string> ExportSlidesIndividually(
+    private Dictionary<int, string> ExportSlidesIndividually(
         object slideCollection,
         string outputFolder,
         int slideCount,
@@ -309,15 +340,18 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
             catch (COMException exception)
             {
                 Debug.WriteLine($"PowerPoint could not render slide {index}: {exception}");
+                _diagnostics.RecordException("PreviewSlideExportFailed", exception);
                 // Keep rendering the remaining slides; the built-in preview covers this one.
             }
             catch (IOException exception)
             {
                 Debug.WriteLine($"The rendered image for slide {index} could not be saved: {exception}");
+                _diagnostics.RecordException("PreviewSlideFileFailed", exception);
             }
             catch (UnauthorizedAccessException exception)
             {
                 Debug.WriteLine($"The rendered image for slide {index} could not be accessed: {exception}");
+                _diagnostics.RecordException("PreviewSlideAccessFailed", exception);
             }
             finally
             {
@@ -377,7 +411,60 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
     }
 
-    private void DeleteRenderFolder(string folder)
+    private void CleanupStaleRenderFolders()
+    {
+        try
+        {
+            if (!Directory.Exists(_renderRoot))
+            {
+                return;
+            }
+
+            var cutoff = _timeProvider.GetUtcNow().UtcDateTime - StaleRenderFolderAge;
+            var deletedCount = 0;
+            foreach (var folder in Directory.EnumerateDirectories(
+                         _renderRoot,
+                         "*",
+                         SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    var folderName = Path.GetFileName(folder);
+                    var attributes = File.GetAttributes(folder);
+                    if (!Guid.TryParseExact(folderName, "N", out _) ||
+                        (attributes & FileAttributes.ReparsePoint) != 0 ||
+                        Directory.GetLastWriteTimeUtc(folder) > cutoff)
+                    {
+                        continue;
+                    }
+
+                    if (DeleteRenderFolder(folder))
+                    {
+                        deletedCount++;
+                    }
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException or SecurityException)
+                {
+                    _diagnostics.RecordException("StalePreviewFolderInspectionFailed", exception);
+                }
+            }
+
+            if (deletedCount > 0)
+            {
+                _diagnostics.RecordEvent(
+                    "StalePreviewCleanupCompleted",
+                    $"folders={deletedCount.ToString(CultureInfo.InvariantCulture)}");
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            _diagnostics.RecordException("StalePreviewCleanupFailed", exception);
+        }
+    }
+
+    private bool DeleteRenderFolder(string folder)
     {
         try
         {
@@ -388,14 +475,16 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 Directory.Exists(fullPath))
             {
                 Directory.Delete(fullPath, true);
+                return true;
             }
         }
-        catch (IOException)
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or SecurityException)
         {
+            _diagnostics.RecordException("PreviewFolderCleanupFailed", exception);
         }
-        catch (UnauthorizedAccessException)
-        {
-        }
+
+        return false;
     }
 
     private static void ReleaseComObject(object? value)
