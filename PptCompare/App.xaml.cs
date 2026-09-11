@@ -14,8 +14,11 @@ public partial class App : Application
 
         IFilePickerService filePicker = new WpfFilePickerService();
         IPresentationRenderer renderer = new PowerPointPresentationRenderer();
-        IPresentationSourceService presentationSource = new OpenXmlPresentationSourceService();
+        var settingsService = new JsonApplicationSettingsService();
+        var settings = settingsService.Load();
+        IPresentationSourceService presentationSource = new OpenXmlPresentationSourceService(settings.ToReadLimits());
         IPresentationComparisonService comparisonService = new TextPresentationComparisonService();
+        ISettingsDialogService settingsDialog = new WpfSettingsDialogService();
 
         var window = new MainWindow
         {
@@ -23,7 +26,10 @@ public partial class App : Application
                 filePicker,
                 presentationSource,
                 comparisonService,
-                renderer)
+                renderer,
+                settingsService,
+                settingsDialog,
+                settings)
         };
 
         MainWindow = window;

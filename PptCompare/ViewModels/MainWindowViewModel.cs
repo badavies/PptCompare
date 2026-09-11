@@ -15,9 +15,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IPresentationSourceService _presentationSource;
     private readonly IPresentationComparisonService _comparisonService;
     private readonly IPresentationRenderer _renderer;
+    private readonly IApplicationSettingsService _settingsService;
+    private readonly ISettingsDialogService _settingsDialog;
     private readonly AsyncRelayCommand _openPresentationCommand;
     private readonly AsyncRelayCommand _compareCommand;
     private readonly AsyncRelayCommand _swapSidesCommand;
+    private readonly RelayCommand _settingsCommand;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private LoadedPresentation? _leftPresentation;
     private LoadedPresentation? _rightPresentation;
@@ -35,17 +38,33 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _addedCountText = "0 added";
     private string _removedCountText = "0 removed";
     private string _movedCountText = "0 moved";
+    private ApplicationSettings _settings;
+    private double _outputTextFontSize;
 
     public MainWindowViewModel(
         IFilePickerService filePicker,
         IPresentationSourceService presentationSource,
         IPresentationComparisonService comparisonService,
-        IPresentationRenderer renderer)
+        IPresentationRenderer renderer,
+        IApplicationSettingsService settingsService,
+        ISettingsDialogService settingsDialog,
+        ApplicationSettings settings)
     {
+        ArgumentNullException.ThrowIfNull(filePicker);
+        ArgumentNullException.ThrowIfNull(presentationSource);
+        ArgumentNullException.ThrowIfNull(comparisonService);
+        ArgumentNullException.ThrowIfNull(renderer);
+        ArgumentNullException.ThrowIfNull(settingsService);
+        ArgumentNullException.ThrowIfNull(settingsDialog);
+        ArgumentNullException.ThrowIfNull(settings);
         _filePicker = filePicker;
         _presentationSource = presentationSource;
         _comparisonService = comparisonService;
         _renderer = renderer;
+        _settingsService = settingsService;
+        _settingsDialog = settingsDialog;
+        _settings = settings;
+        _outputTextFontSize = PointsToDeviceIndependentPixels(settings.OutputFontSizePoints);
 
         LeftVersions = [];
         RightVersions = [];
@@ -63,6 +82,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             SwapSidesAsync,
             _ => !_isBusy,
             HandleUnexpectedCommandException);
+        _settingsCommand = new RelayCommand(OpenSettings, _ => !_isBusy);
     }
 
     public ObservableCollection<VersionDescriptor> LeftVersions { get; }
@@ -141,9 +161,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _movedCountText, value);
     }
 
+    public double OutputTextFontSize
+    {
+        get => _outputTextFontSize;
+        private set => SetProperty(ref _outputTextFontSize, value);
+    }
+
     public ICommand OpenPresentationCommand => _openPresentationCommand;
     public ICommand CompareCommand => _compareCommand;
     public ICommand SwapSidesCommand => _swapSidesCommand;
+    public ICommand SettingsCommand => _settingsCommand;
 
     private async Task OpenPresentationAsync(object? parameter)
     {
@@ -192,10 +219,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             _hasCompared = false;
             _comparisonRefreshPending = false;
-            StatusMessage = _leftPresentation is not null && _rightPresentation is not null
-                ? $"Loaded {loaded.Slides.Count} slides from {fileName}. Ready to compare. Preparing the PowerPoint preview in the background."
-                : $"Loaded {loaded.Slides.Count} slides from {fileName}. Choose the other presentation. Preparing the PowerPoint preview in the background.";
-            _ = RenderPresentationInBackgroundAsync(loaded);
+            StatusMessage = BuildLoadedStatus(loaded, fileName);
+            if (_settings.UsePowerPointRendering)
+            {
+                _ = RenderPresentationInBackgroundAsync(loaded);
+            }
         }
         catch (PresentationLoadException exception)
         {
@@ -318,6 +346,75 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "A UI command boundary must convert unexpected settings errors into a safe status message.")]
+    private void OpenSettings(object? parameter)
+    {
+        try
+        {
+            var previousSettings = _settings;
+            var updatedSettings = _settingsDialog.EditSettings(previousSettings);
+            if (updatedSettings is null)
+            {
+                return;
+            }
+
+            _settingsService.Save(updatedSettings);
+            if (_presentationSource is IConfigurablePresentationSourceService configurableSource)
+            {
+                configurableSource.UpdateLimits(updatedSettings.ToReadLimits());
+            }
+
+            _settings = updatedSettings;
+            OutputTextFontSize = PointsToDeviceIndependentPixels(updatedSettings.OutputFontSizePoints);
+            StatusMessage = "Settings saved. File safety limits apply when the next presentation is opened.";
+
+            if (!previousSettings.UsePowerPointRendering && updatedSettings.UsePowerPointRendering)
+            {
+                StartMissingPreviewRendering();
+            }
+        }
+        catch (SettingsPersistenceException exception)
+        {
+            Debug.WriteLine(exception);
+            StatusMessage = exception.Message;
+        }
+        catch (Exception exception)
+        {
+            HandleUnexpectedCommandException(exception);
+        }
+    }
+
+    private void StartMissingPreviewRendering()
+    {
+        if (_leftPresentation is { } left && left.Slides.Any(slide => slide.RenderedImagePath is null))
+        {
+            _ = RenderPresentationInBackgroundAsync(left);
+        }
+
+        if (_rightPresentation is { } right &&
+            !ReferenceEquals(right, _leftPresentation) &&
+            right.Slides.Any(slide => slide.RenderedImagePath is null))
+        {
+            _ = RenderPresentationInBackgroundAsync(right);
+        }
+    }
+
+    private string BuildLoadedStatus(LoadedPresentation loaded, string fileName)
+    {
+        var nextAction = _leftPresentation is not null && _rightPresentation is not null
+            ? "Ready to compare."
+            : "Choose the other presentation.";
+        var previewStatus = _settings.UsePowerPointRendering
+            ? " Preparing the PowerPoint preview in the background."
+            : " The built-in preview is ready.";
+        return $"Loaded {loaded.Slides.Count} slides from {fileName}. {nextAction}{previewStatus}";
+    }
+
+    private static double PointsToDeviceIndependentPixels(double points) => points * 96d / 72d;
+
     private void SwapDisplayedComparison(int? selectedSlideNumber)
     {
         var swappedSlides = Slides.Select(SwapComparisonItem).ToList();
@@ -369,6 +466,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             LeftBodySegments = ReverseSegments(item.RightBodySegments),
             RightTitleSegments = ReverseSegments(item.LeftTitleSegments),
             RightBodySegments = ReverseSegments(item.LeftBodySegments),
+            LeftTitleContent = item.RightTitleContent,
+            LeftBodyContent = item.RightBodyContent,
+            RightTitleContent = item.LeftTitleContent,
+            RightBodyContent = item.LeftBodyContent,
             LeftSlide = item.RightSlide,
             RightSlide = item.LeftSlide,
             ElementChanges = item.ElementChanges.Select(ReverseElementChange).ToList()
@@ -566,6 +667,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _openPresentationCommand.RaiseCanExecuteChanged();
         _compareCommand.RaiseCanExecuteChanged();
         _swapSidesCommand.RaiseCanExecuteChanged();
+        _settingsCommand.RaiseCanExecuteChanged();
     }
 
     private void HandleUnexpectedCommandException(Exception exception)

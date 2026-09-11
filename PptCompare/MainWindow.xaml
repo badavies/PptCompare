@@ -10,9 +10,11 @@
         Background="{StaticResource WindowBrush}"
         FontFamily="Segoe UI"
         Foreground="{StaticResource InkBrush}"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
         WindowStartupLocation="CenterScreen">
     <DockPanel>
-        <Border DockPanel.Dock="Top" Background="#172033" Padding="20,13">
+        <Border DockPanel.Dock="Top" Background="{StaticResource HeaderBrush}" Padding="20,13">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
@@ -21,17 +23,20 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Border Width="34" Height="34" CornerRadius="7" Background="#E85D4A" Margin="0,0,12,0">
-                        <TextBlock Text="P" Foreground="White" FontWeight="Bold" FontSize="18"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
+                    <Image Source="Assets/PptCompareIcon.png" Width="34" Height="34"
+                           Stretch="Uniform" Margin="0,0,12,0"
+                           SnapsToDevicePixels="True"
+                           RenderOptions.BitmapScalingMode="HighQuality" />
                     <StackPanel>
                         <TextBlock Text="PptCompare" Foreground="White" FontSize="18" FontWeight="SemiBold" />
-                        <TextBlock Text="Presentation version review" Foreground="#AAB4C5" FontSize="11" />
+                        <TextBlock Text="Presentation version review" Foreground="#DCE5FF" FontSize="11" />
                     </StackPanel>
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button Content="Settings" Command="{Binding SettingsCommand}"
+                            Margin="0,0,10,0" Padding="14,8" Background="#243B82"
+                            BorderBrush="#7087CD" Foreground="White" />
                     <Button Content="Compare" Style="{StaticResource PrimaryButton}" Command="{Binding CompareCommand}" />
                 </StackPanel>
             </Grid>
@@ -224,13 +229,18 @@
                                     <StackPanel>
                                         <controls:DiffTextBlock PlainText="{Binding SelectedSlide.LeftTitle}"
                                                                 Segments="{Binding SelectedSlide.LeftTitleSegments}"
-                                                                FontSize="27" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                                RichContent="{Binding SelectedSlide.LeftTitleContent}"
+                                                                FontSize="{Binding OutputTextFontSize}" />
                                         <Border Height="4" Width="72" Background="#3B82F6" HorizontalAlignment="Left" Margin="0,18,0,26" />
                                         <controls:DiffTextBlock PlainText="{Binding SelectedSlide.LeftBody}"
                                                                 Segments="{Binding SelectedSlide.LeftBodySegments}"
-                                                                FontSize="16" LineHeight="27" TextWrapping="Wrap" />
+                                                                RichContent="{Binding SelectedSlide.LeftBodyContent}"
+                                                                FontSize="{Binding OutputTextFontSize}" />
                                         <Border Background="#FDECEC" BorderBrush="#F5B5B0" BorderThickness="1" Padding="12" Margin="0,30,0,0">
-                                            <TextBlock Text="{Binding SelectedSlide.LeftCallout}" Foreground="#A7332C" TextWrapping="Wrap" />
+                                            <TextBox Text="{Binding SelectedSlide.LeftCallout}" Foreground="#A7332C"
+                                                     IsReadOnly="True" BorderThickness="0" Padding="0"
+                                                     FontSize="{Binding OutputTextFontSize}"
+                                                     Background="Transparent" TextWrapping="Wrap" />
                                         </Border>
                                     </StackPanel>
                                 </Border>
@@ -263,13 +273,18 @@
                                     <StackPanel>
                                         <controls:DiffTextBlock PlainText="{Binding SelectedSlide.RightTitle}"
                                                                 Segments="{Binding SelectedSlide.RightTitleSegments}"
-                                                                FontSize="27" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                                RichContent="{Binding SelectedSlide.RightTitleContent}"
+                                                                FontSize="{Binding OutputTextFontSize}" />
                                         <Border Height="4" Width="72" Background="#A855F7" HorizontalAlignment="Left" Margin="0,18,0,26" />
                                         <controls:DiffTextBlock PlainText="{Binding SelectedSlide.RightBody}"
                                                                 Segments="{Binding SelectedSlide.RightBodySegments}"
-                                                                FontSize="16" LineHeight="27" TextWrapping="Wrap" />
+                                                                RichContent="{Binding SelectedSlide.RightBodyContent}"
+                                                                FontSize="{Binding OutputTextFontSize}" />
                                         <Border Background="#EAF7EE" BorderBrush="#A9DCB7" BorderThickness="1" Padding="12" Margin="0,30,0,0">
-                                            <TextBlock Text="{Binding SelectedSlide.RightCallout}" Foreground="#146B32" TextWrapping="Wrap" />
+                                            <TextBox Text="{Binding SelectedSlide.RightCallout}" Foreground="#146B32"
+                                                     IsReadOnly="True" BorderThickness="0" Padding="0"
+                                                     FontSize="{Binding OutputTextFontSize}"
+                                                     Background="Transparent" TextWrapping="Wrap" />
                                         </Border>
                                     </StackPanel>
                                 </Border>
