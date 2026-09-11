@@ -1,0 +1,102 @@
+<Window x:Class="PptCompare.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PptCompare settings"
+        Width="610"
+        Height="720"
+        MinWidth="560"
+        MinHeight="560"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#172033" />
+        </Style>
+        <Style x:Key="SectionHeading" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,12,0,8" />
+        </Style>
+        <Style x:Key="SettingLabel" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,5" />
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="MinWidth" Value="130" />
+            <Setter Property="MaxLength" Value="12" />
+            <Setter Property="Padding" Value="7,4" />
+            <Setter Property="Margin" Value="12,4,0,4" />
+            <Setter Property="HorizontalContentAlignment" Value="Right" />
+        </Style>
+    </Window.Resources>
+
+    <DockPanel Background="#F5F7FB">
+        <Border DockPanel.Dock="Bottom" Background="White" BorderBrush="#D8DEE9" BorderThickness="0,1,0,0" Padding="16,12">
+            <Grid>
+                <Button HorizontalAlignment="Left" Content="Restore defaults" Padding="14,7" Click="RestoreDefaults_OnClick" />
+                <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
+                    <Button Content="Cancel" IsCancel="True" Padding="18,7" Margin="0,0,8,0" />
+                    <Button Content="Save" IsDefault="True" Padding="22,7" Background="#2864DC" Foreground="White" Click="Save_OnClick" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="22,12,22,22">
+            <StackPanel>
+                <TextBlock Text="Settings" FontSize="24" FontWeight="SemiBold" />
+                <TextBlock Text="These preferences are stored for your Windows user account." Foreground="#68758D" Margin="0,2,0,8" />
+
+                <TextBlock Style="{StaticResource SectionHeading}" Text="Text output" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource SettingLabel}" Text="Text size (points)" />
+                    <TextBox Grid.Column="1" Text="{Binding OutputFontSizePoints, UpdateSourceTrigger=PropertyChanged}" />
+                </Grid>
+                <TextBlock Text="Font family, colour, bold, italic, underline, subscript and superscript are retained from the slide. The original font size is replaced by this size." TextWrapping="Wrap" Foreground="#68758D" Margin="0,2,0,8" />
+
+                <TextBlock Style="{StaticResource SectionHeading}" Text="Preview" />
+                <CheckBox Content="Use Microsoft PowerPoint to create slide preview images when available"
+                          IsChecked="{Binding UsePowerPointRendering}"
+                          Margin="0,3,0,8" />
+
+                <TextBlock Style="{StaticResource SectionHeading}" Text="File safety limits" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Style="{StaticResource SettingLabel}" Text="Maximum presentation size (MB)" />
+                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding MaxFileSizeMb}" />
+                    <TextBlock Grid.Row="1" Style="{StaticResource SettingLabel}" Text="Maximum slides" />
+                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MaxSlides}" />
+                    <TextBlock Grid.Row="2" Style="{StaticResource SettingLabel}" Text="Maximum elements per slide" />
+                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MaxElementsPerSlide}" />
+                    <TextBlock Grid.Row="3" Style="{StaticResource SettingLabel}" Text="Maximum table cells per slide" />
+                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding MaxTableCellsPerSlide}" />
+                    <TextBlock Grid.Row="4" Style="{StaticResource SettingLabel}" Text="Maximum text paragraphs per slide" />
+                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding MaxParagraphsPerSlide}" />
+                    <TextBlock Grid.Row="5" Style="{StaticResource SettingLabel}" Text="Maximum characters per slide" />
+                    <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding MaxCharactersPerSlide}" />
+                    <TextBlock Grid.Row="6" Style="{StaticResource SettingLabel}" Text="Maximum characters per presentation" />
+                    <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding MaxTotalCharacters}" />
+                    <TextBlock Grid.Row="7" Style="{StaticResource SettingLabel}" Text="Maximum embedded item size (MB)" />
+                    <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding MaxEmbeddedItemSizeMb}" />
+                    <TextBlock Grid.Row="8" Style="{StaticResource SettingLabel}" Text="Maximum preview image size (MB)" />
+                    <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding MaxPreviewImageSizeMb}" />
+                    <TextBlock Grid.Row="9" Style="{StaticResource SettingLabel}" Text="Maximum total preview images (MB)" />
+                    <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding MaxTotalPreviewImageSizeMb}" />
+                </Grid>
+                <TextBlock Text="Values are validated against built-in safety ceilings. New limits apply the next time a presentation is opened." TextWrapping="Wrap" Foreground="#68758D" Margin="0,8,0,0" />
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

@@ -12,17 +12,6 @@ using P = DocumentFormat.OpenXml.Presentation;
 
 namespace PptCompare.Services;
 
-public sealed record PresentationReadLimits(
-    long MaxFileBytes = 250L * 1024 * 1024,
-    long MaxCharactersPerPart = 5_000_000,
-    int MaxSlides = 2_000,
-    int MaxParagraphsPerSlide = 10_000,
-    int MaxCharactersPerSlide = 500_000,
-    long MaxTotalCharacters = 20_000_000,
-    long MaxRelatedPartBytes = 100L * 1024 * 1024,
-    int MaxPreviewImageBytes = 25 * 1024 * 1024,
-    long MaxTotalPreviewImageBytes = 100L * 1024 * 1024);
-
 public sealed class PresentationLoadException : Exception
 {
     public PresentationLoadException(string message)
@@ -68,6 +57,11 @@ public interface IPresentationSourceService
         CancellationToken cancellationToken = default);
 }
 
+public interface IConfigurablePresentationSourceService
+{
+    void UpdateLimits(PresentationReadLimits limits);
+}
+
 public sealed record SlideRenderingResult(
     IReadOnlyDictionary<int, string> SlideImages,
     string Status);
@@ -88,7 +82,7 @@ public interface IPresentationComparisonService
         CancellationToken cancellationToken = default);
 }
 
-public sealed class OpenXmlPresentationSourceService : IPresentationSourceService
+public sealed class OpenXmlPresentationSourceService : IPresentationSourceService, IConfigurablePresentationSourceService
 {
     private static readonly XNamespace PresentationNamespace =
         "http://schemas.openxmlformats.org/presentationml/2006/main";
@@ -96,12 +90,23 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         "http://schemas.openxmlformats.org/drawingml/2006/main";
     private static readonly XNamespace RelationshipNamespace =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-    private readonly PresentationReadLimits _limits;
+    private readonly object _limitsGate = new();
+    private PresentationReadLimits _limits;
 
     public OpenXmlPresentationSourceService(PresentationReadLimits? limits = null)
     {
         _limits = limits ?? new PresentationReadLimits();
         ValidateLimits(_limits);
+    }
+
+    public void UpdateLimits(PresentationReadLimits limits)
+    {
+        ArgumentNullException.ThrowIfNull(limits);
+        ValidateLimits(limits);
+        lock (_limitsGate)
+        {
+            _limits = limits;
+        }
     }
 
     public async Task<LoadedPresentation> LoadAsync(
@@ -121,11 +126,12 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var path = ValidateFile(presentation.Location);
+            var limits = GetLimits();
+            var path = ValidateFile(presentation.Location, limits);
             var openSettings = new OpenSettings
             {
                 AutoSave = false,
-                MaxCharactersInPart = _limits.MaxCharactersPerPart
+                MaxCharactersInPart = limits.MaxCharactersPerPart
             };
 
             using var document = PresentationDocument.Open(path, false, openSettings);
@@ -137,12 +143,12 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                     "The selected file does not contain a readable presentation root.");
             var slideIdList = presentationRoot.SlideIdList
                 ?? throw new PresentationLoadException("The selected presentation does not contain any slides.");
-            var slideIds = slideIdList.Elements<P.SlideId>().Take(_limits.MaxSlides + 1).ToList();
+            var slideIds = slideIdList.Elements<P.SlideId>().Take(limits.MaxSlides + 1).ToList();
 
-            if (slideIds.Count > _limits.MaxSlides)
+            if (slideIds.Count > limits.MaxSlides)
             {
                 throw new PresentationLoadException(
-                    $"The presentation contains more than the supported limit of {_limits.MaxSlides:N0} slides.");
+                    $"The presentation contains more than the supported limit of {limits.MaxSlides:N0} slides.");
             }
 
             var slides = new List<PresentationSlide>();
@@ -170,23 +176,47 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                 var slideXml = XElement.Parse(slideRoot.OuterXml, LoadOptions.None);
                 var paragraphCount = slideXml
                     .Descendants(DrawingNamespace + "p")
-                    .Take(_limits.MaxParagraphsPerSlide + 1)
+                    .Take(limits.MaxParagraphsPerSlide + 1)
                     .Count();
-                if (paragraphCount > _limits.MaxParagraphsPerSlide)
+                if (paragraphCount > limits.MaxParagraphsPerSlide)
                 {
                     throw new PresentationLoadException(
                         $"Slide {slides.Count + 1} contains too many text paragraphs to process safely.");
                 }
 
-                var paragraphs = ExtractParagraphsInReadingOrder(slidePart, slideXml);
+                var drawableElementCount = slideXml
+                    .Descendants(PresentationNamespace + "spTree")
+                    .FirstOrDefault()?
+                    .Elements()
+                    .Where(IsDrawableElement)
+                    .Take(limits.MaxElementsPerSlide + 1)
+                    .Count() ?? 0;
+                if (drawableElementCount > limits.MaxElementsPerSlide)
+                {
+                    throw new PresentationLoadException(
+                        $"Slide {slides.Count + 1} contains too many elements to process safely.");
+                }
+
+                var tableCellCount = slideXml
+                    .Descendants(DrawingNamespace + "tc")
+                    .Take(limits.MaxTableCellsPerSlide + 1)
+                    .Count();
+                if (tableCellCount > limits.MaxTableCellsPerSlide)
+                {
+                    throw new PresentationLoadException(
+                        $"Slide {slides.Count + 1} contains too many table cells to process safely.");
+                }
+
+                var extractedText = ExtractTextInReadingOrder(slidePart, slideXml);
+                var paragraphs = extractedText.PlainParagraphs;
                 var slideCharacters = 0;
                 foreach (var text in paragraphs)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     slideCharacters += text.Length;
                     totalCharacters += text.Length;
-                    if (slideCharacters > _limits.MaxCharactersPerSlide ||
-                        totalCharacters > _limits.MaxTotalCharacters)
+                    if (slideCharacters > limits.MaxCharactersPerSlide ||
+                        totalCharacters > limits.MaxTotalCharacters)
                     {
                         throw new PresentationLoadException(
                             "The presentation contains more text than can be processed safely.");
@@ -201,6 +231,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                 var elements = ExtractElements(
                     slidePart,
                     slideXml,
+                    limits,
                     ref totalPreviewImageBytes,
                     cancellationToken);
                 slides.Add(new PresentationSlide(
@@ -209,7 +240,11 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                     paragraphs,
                     slideWidth,
                     slideHeight,
-                    elements));
+                    elements)
+                {
+                    TitleContent = extractedText.Title,
+                    TextContent = extractedText.Blocks
+                });
             }
 
             if (slides.Count == 0)
@@ -238,7 +273,15 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         }
     }
 
-    private string ValidateFile(string location)
+    private PresentationReadLimits GetLimits()
+    {
+        lock (_limitsGate)
+        {
+            return _limits;
+        }
+    }
+
+    private static string ValidateFile(string location, PresentationReadLimits limits)
     {
         if (string.IsNullOrWhiteSpace(location))
         {
@@ -264,10 +307,10 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             throw new PresentationLoadException("The selected presentation is empty.");
         }
 
-        if (file.Length > _limits.MaxFileBytes)
+        if (file.Length > limits.MaxFileBytes)
         {
             throw new PresentationLoadException(
-                $"The selected presentation is larger than the supported limit of {_limits.MaxFileBytes / 1024 / 1024:N0} MB.");
+                $"The selected presentation is larger than the supported limit of {limits.MaxFileBytes / 1024 / 1024:N0} MB.");
         }
 
         return fullPath;
@@ -278,6 +321,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         if (limits.MaxFileBytes <= 0 ||
             limits.MaxCharactersPerPart <= 0 ||
             limits.MaxSlides <= 0 ||
+            limits.MaxElementsPerSlide <= 0 ||
+            limits.MaxTableCellsPerSlide <= 0 ||
             limits.MaxParagraphsPerSlide <= 0 ||
             limits.MaxCharactersPerSlide <= 0 ||
             limits.MaxTotalCharacters <= 0 ||
@@ -289,14 +334,15 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         }
     }
 
-    private static List<string> ExtractParagraphsInReadingOrder(
+    private static ExtractedSlideText ExtractTextInReadingOrder(
         SlidePart slidePart,
         XElement slideXml)
     {
+        var themeColors = ReadThemeColors(slidePart);
         var shapeTree = slideXml.Descendants(PresentationNamespace + "spTree").FirstOrDefault();
         if (shapeTree is null)
         {
-            return ExtractParagraphs(slideXml);
+            return CreateFallbackText(slideXml, themeColors);
         }
 
         var layoutXml = slidePart.SlideLayoutPart?.SlideLayout is { } layout
@@ -312,27 +358,369 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                 index,
                 ResolveBounds(element, layoutXml, masterXml),
                 IsTitlePlaceholder(element),
-                ExtractParagraphs(element)))
+                ExtractTextBlocks(element, themeColors)))
             .Where(candidate => candidate.Paragraphs.Count > 0)
             .ToList();
         if (candidates.Count == 0)
         {
-            return ExtractParagraphs(slideXml);
+            return CreateFallbackText(slideXml, themeColors);
         }
 
         // PowerPoint stores shapes in drawing/z-order, which is not necessarily reading order.
         // The first entry is metadata for the comparison heading. Keep every actual paragraph,
         // including that title text at its visible position, in the spatially ordered body.
-        var title = candidates.FirstOrDefault(candidate => candidate.IsTitle) ?? candidates[0];
-        var paragraphs = new List<string> { title.Paragraphs[0] };
-        paragraphs.AddRange(candidates
+        var titleCandidate = candidates.FirstOrDefault(candidate => candidate.IsTitle) ?? candidates[0];
+        var title = titleCandidate.Paragraphs[0];
+        var blocks = candidates
             .OrderBy(candidate => candidate.HasBounds ? 0 : 1)
             .ThenBy(candidate => candidate.Bounds.Y)
             .ThenBy(candidate => candidate.Bounds.X)
             .ThenBy(candidate => candidate.DocumentOrder)
-            .SelectMany(candidate => candidate.Paragraphs));
-        return paragraphs;
+            .SelectMany(candidate => candidate.Blocks)
+            .ToList();
+        var paragraphs = new List<string> { title.Text };
+        paragraphs.AddRange(EnumerateParagraphs(blocks).Select(paragraph => paragraph.Text));
+        return new ExtractedSlideText(paragraphs, title, blocks);
     }
+
+    private static ExtractedSlideText CreateFallbackText(
+        XElement element,
+        IReadOnlyDictionary<string, string> themeColors)
+    {
+        var richParagraphs = element
+            .Descendants(DrawingNamespace + "p")
+            .Select(paragraph => ExtractTextParagraph(paragraph, themeColors))
+            .Where(paragraph => paragraph.Text.Length > 0)
+            .ToList();
+        var title = richParagraphs.FirstOrDefault();
+        var blocks = richParagraphs
+            .Select(paragraph => (SlideTextBlock)new SlideTextParagraphBlock(paragraph))
+            .ToList();
+        var plainParagraphs = richParagraphs.Select(paragraph => paragraph.Text).ToList();
+        return new ExtractedSlideText(plainParagraphs, title, blocks);
+    }
+
+    private static List<SlideTextBlock> ExtractTextBlocks(
+        XElement element,
+        IReadOnlyDictionary<string, string> themeColors)
+    {
+        var table = element.Descendants(DrawingNamespace + "tbl").FirstOrDefault();
+        if (table is not null)
+        {
+            return [ExtractTextTable(table, themeColors)];
+        }
+
+        return element
+            .Descendants(DrawingNamespace + "p")
+            .Select(paragraph => ExtractTextParagraph(paragraph, themeColors))
+            .Where(paragraph => paragraph.Text.Length > 0)
+            .Select(paragraph => (SlideTextBlock)new SlideTextParagraphBlock(paragraph))
+            .ToList();
+    }
+
+    private static SlideTextTableBlock ExtractTextTable(
+        XElement table,
+        IReadOnlyDictionary<string, string> themeColors)
+    {
+        var rows = table
+            .Elements(DrawingNamespace + "tr")
+            .Select(row => new SlideTextTableRow(row
+                .Elements(DrawingNamespace + "tc")
+                .Select(cell => new SlideTextTableCell(
+                    cell.Descendants(DrawingNamespace + "p")
+                        .Select(paragraph => ExtractTextParagraph(paragraph, themeColors))
+                        .Where(paragraph => paragraph.Text.Length > 0)
+                        .ToList(),
+                    ReadSpan(cell, "gridSpan"),
+                    ReadSpan(cell, "rowSpan")))
+                .ToList()))
+            .ToList();
+        var gridColumns = table
+            .Element(DrawingNamespace + "tblGrid")?
+            .Elements(DrawingNamespace + "gridCol")
+            .Count() ?? 0;
+        var populatedColumns = rows.Count == 0
+            ? 0
+            : rows.Max(row => row.Cells.Sum(cell => Math.Max(1, cell.ColumnSpan)));
+        return new SlideTextTableBlock(rows, Math.Max(1, Math.Max(gridColumns, populatedColumns)));
+    }
+
+    private static int ReadSpan(XElement cell, string attributeName)
+    {
+        var rawValue = cell.Attribute(attributeName)?.Value ??
+                       cell.Element(DrawingNamespace + "tcPr")?.Attribute(attributeName)?.Value;
+        return int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var span)
+            ? Math.Clamp(span, 1, 100)
+            : 1;
+    }
+
+    private static IEnumerable<SlideTextParagraph> EnumerateParagraphs(
+        IEnumerable<SlideTextBlock> blocks)
+    {
+        foreach (var block in blocks)
+        {
+            if (block is SlideTextParagraphBlock paragraphBlock)
+            {
+                if (paragraphBlock.Paragraph.Text.Length > 0)
+                {
+                    yield return paragraphBlock.Paragraph;
+                }
+
+                continue;
+            }
+
+            if (block is not SlideTextTableBlock table)
+            {
+                continue;
+            }
+
+            foreach (var paragraph in table.Rows
+                         .SelectMany(row => row.Cells)
+                         .SelectMany(cell => cell.Paragraphs)
+                         .Where(paragraph => paragraph.Text.Length > 0))
+            {
+                yield return paragraph;
+            }
+        }
+    }
+
+    private static SlideTextParagraph ExtractTextParagraph(
+        XElement paragraph,
+        IReadOnlyDictionary<string, string> themeColors)
+    {
+        var paragraphProperties = paragraph.Element(DrawingNamespace + "pPr");
+        var level = int.TryParse(
+            paragraphProperties?.Attribute("lvl")?.Value,
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out var parsedLevel)
+            ? Math.Clamp(parsedLevel + 1, 1, 9)
+            : 1;
+        var listDefault = paragraph
+            .Ancestors()
+            .FirstOrDefault(value => value.Name.LocalName == "txBody")?
+            .Element(DrawingNamespace + "lstStyle")?
+            .Element(DrawingNamespace + $"lvl{level}pPr")?
+            .Element(DrawingNamespace + "defRPr");
+        var paragraphDefault = paragraphProperties?.Element(DrawingNamespace + "defRPr");
+        var runs = new List<SlideTextRun>();
+
+        foreach (var child in paragraph.Elements())
+        {
+            if (child.Name == DrawingNamespace + "br")
+            {
+                runs.Add(new SlideTextRun(
+                    Environment.NewLine,
+                    ReadTextStyle(
+                        themeColors,
+                        listDefault,
+                        paragraphDefault,
+                        child.Element(DrawingNamespace + "rPr"))));
+                continue;
+            }
+
+            if (child.Name != DrawingNamespace + "r" && child.Name != DrawingNamespace + "fld")
+            {
+                continue;
+            }
+
+            var text = child.Element(DrawingNamespace + "t")?.Value;
+            if (!string.IsNullOrEmpty(text))
+            {
+                runs.Add(new SlideTextRun(
+                    text,
+                    ReadTextStyle(
+                        themeColors,
+                        listDefault,
+                        paragraphDefault,
+                        child.Element(DrawingNamespace + "rPr"))));
+            }
+        }
+
+        if (runs.Count == 0)
+        {
+            var text = string.Concat(
+                paragraph.Descendants(DrawingNamespace + "t").Select(value => value.Value));
+            if (text.Length > 0)
+            {
+                runs.Add(new SlideTextRun(
+                    text,
+                    ReadTextStyle(themeColors, listDefault, paragraphDefault)));
+            }
+        }
+
+        TrimRuns(runs);
+        return new SlideTextParagraph(runs);
+    }
+
+    private static void TrimRuns(List<SlideTextRun> runs)
+    {
+        while (runs.Count > 0)
+        {
+            var trimmed = runs[0].Text.TrimStart();
+            if (trimmed.Length > 0)
+            {
+                runs[0] = runs[0] with { Text = trimmed };
+                break;
+            }
+
+            runs.RemoveAt(0);
+        }
+
+        while (runs.Count > 0)
+        {
+            var last = runs.Count - 1;
+            var trimmed = runs[last].Text.TrimEnd();
+            if (trimmed.Length > 0)
+            {
+                runs[last] = runs[last] with { Text = trimmed };
+                break;
+            }
+
+            runs.RemoveAt(last);
+        }
+    }
+
+    private static SlideTextStyle ReadTextStyle(
+        IReadOnlyDictionary<string, string> themeColors,
+        params XElement?[] layers)
+    {
+        bool? bold = null;
+        bool? italic = null;
+        bool? underline = null;
+        bool? strikeThrough = null;
+        var baseline = SlideTextBaseline.Normal;
+        string? color = null;
+        double? fontSize = null;
+        string? fontFamily = null;
+
+        foreach (var layer in layers.Where(layer => layer is not null))
+        {
+            bold = ReadOptionalBoolean(layer!, "b") ?? bold;
+            italic = ReadOptionalBoolean(layer!, "i") ?? italic;
+            var underlineValue = layer!.Attribute("u")?.Value;
+            if (underlineValue is not null)
+            {
+                underline = !string.Equals(underlineValue, "none", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var strikeValue = layer.Attribute("strike")?.Value;
+            if (strikeValue is not null)
+            {
+                strikeThrough = !string.Equals(strikeValue, "noStrike", StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (int.TryParse(
+                    layer.Attribute("baseline")?.Value,
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var baselineValue))
+            {
+                baseline = baselineValue switch
+                {
+                    > 0 => SlideTextBaseline.Superscript,
+                    < 0 => SlideTextBaseline.Subscript,
+                    _ => SlideTextBaseline.Normal
+                };
+            }
+
+            if (int.TryParse(
+                    layer.Attribute("sz")?.Value,
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var sizeValue) && sizeValue is >= 100 and <= 40_000)
+            {
+                fontSize = sizeValue / 100d;
+            }
+
+            var typeface = layer.Element(DrawingNamespace + "latin")?.Attribute("typeface")?.Value;
+            if (!string.IsNullOrWhiteSpace(typeface) && !typeface.StartsWith('+'))
+            {
+                fontFamily = typeface;
+            }
+
+            color = ReadTextColor(layer, themeColors) ?? color;
+        }
+
+        return new SlideTextStyle(
+            bold,
+            italic,
+            underline,
+            strikeThrough,
+            baseline,
+            color,
+            fontSize,
+            fontFamily);
+    }
+
+    private static bool? ReadOptionalBoolean(XElement element, string attributeName)
+    {
+        var value = element.Attribute(attributeName)?.Value;
+        if (value is null)
+        {
+            return null;
+        }
+
+        return value is "1" or "true" or "on";
+    }
+
+    private static string? ReadTextColor(
+        XElement properties,
+        IReadOnlyDictionary<string, string> themeColors)
+    {
+        var color = properties.Element(DrawingNamespace + "solidFill")?.Elements().FirstOrDefault();
+        if (color is null)
+        {
+            return null;
+        }
+
+        var rawValue = color.Name.LocalName switch
+        {
+            "srgbClr" => color.Attribute("val")?.Value,
+            "sysClr" => color.Attribute("lastClr")?.Value,
+            "schemeClr" when color.Attribute("val")?.Value is { } scheme &&
+                             themeColors.TryGetValue(scheme, out var themeColor) => themeColor,
+            _ => null
+        };
+        return IsRgbHex(rawValue) ? $"#{rawValue}" : null;
+    }
+
+    private static Dictionary<string, string> ReadThemeColors(SlidePart slidePart)
+    {
+        var theme = slidePart.SlideLayoutPart?.SlideMasterPart?.ThemePart?.Theme;
+        if (theme is null)
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var themeXml = XElement.Parse(theme.OuterXml, LoadOptions.None);
+        var colorScheme = themeXml.Descendants(DrawingNamespace + "clrScheme").FirstOrDefault();
+        if (colorScheme is null)
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var colors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in colorScheme.Elements())
+        {
+            var color = entry.Elements().FirstOrDefault();
+            var value = color?.Name.LocalName switch
+            {
+                "srgbClr" => color.Attribute("val")?.Value,
+                "sysClr" => color.Attribute("lastClr")?.Value,
+                _ => null
+            };
+            if (IsRgbHex(value))
+            {
+                colors[entry.Name.LocalName] = value!;
+            }
+        }
+
+        return colors;
+    }
+
+    private static bool IsRgbHex(string? value) =>
+        value is { Length: 6 } && value.All(Uri.IsHexDigit);
 
     private static SlideBounds ResolveBounds(
         XElement element,
@@ -410,14 +798,6 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
     private static bool HasBounds(SlideBounds bounds) =>
         bounds.Width > 0 || bounds.Height > 0;
 
-    private static List<string> ExtractParagraphs(XElement element) =>
-        element
-            .Descendants(DrawingNamespace + "p")
-            .Select(paragraph => string.Concat(
-                paragraph.Descendants(DrawingNamespace + "t").Select(value => value.Value)).Trim())
-            .Where(text => !string.IsNullOrWhiteSpace(text))
-            .ToList();
-
     private static bool IsTitlePlaceholder(XElement element)
     {
         var placeholderType = element
@@ -428,9 +808,10 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         return placeholderType is "title" or "ctrTitle";
     }
 
-    private List<SlideElement> ExtractElements(
+    private static List<SlideElement> ExtractElements(
         SlidePart slidePart,
         XElement slideXml,
+        PresentationReadLimits limits,
         ref long totalPreviewImageBytes,
         CancellationToken cancellationToken)
     {
@@ -466,6 +847,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                 slidePart,
                 element,
                 kind == SlideElementKind.Image,
+                limits,
                 ref totalPreviewImageBytes,
                 cancellationToken);
             var canonicalMarkup = CreateCanonicalMarkup(element);
@@ -533,10 +915,11 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             ? value
             : 0;
 
-    private RelatedContent ReadRelatedContent(
+    private static RelatedContent ReadRelatedContent(
         SlidePart slidePart,
         XElement element,
         bool capturePreview,
+        PresentationReadLimits limits,
         ref long totalPreviewImageBytes,
         CancellationToken cancellationToken)
     {
@@ -569,6 +952,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             var partContent = ReadAndHashPart(
                 stream,
                 capturePreview && previewBytes is null,
+                limits,
                 ref totalPreviewImageBytes,
                 cancellationToken);
             hashes.Add(partContent.Hash);
@@ -580,9 +964,10 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             previewBytes);
     }
 
-    private RelatedContent ReadAndHashPart(
+    private static RelatedContent ReadAndHashPart(
         Stream stream,
         bool capturePreview,
+        PresentationReadLimits limits,
         ref long totalPreviewImageBytes,
         CancellationToken cancellationToken)
     {
@@ -602,7 +987,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             }
 
             totalBytes += read;
-            if (totalBytes > _limits.MaxRelatedPartBytes)
+            if (totalBytes > limits.MaxRelatedPartBytes)
             {
                 throw new PresentationLoadException(
                     "The presentation contains an embedded item that is too large to process safely.");
@@ -611,8 +996,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             hash.AppendData(buffer, 0, read);
             if (keepPreview)
             {
-                if (totalBytes <= _limits.MaxPreviewImageBytes &&
-                    totalPreviewImageBytes + totalBytes <= _limits.MaxTotalPreviewImageBytes)
+                if (totalBytes <= limits.MaxPreviewImageBytes &&
+                    totalPreviewImageBytes + totalBytes <= limits.MaxTotalPreviewImageBytes)
                 {
                     preview!.Write(buffer, 0, read);
                 }
@@ -670,10 +1055,17 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         int DocumentOrder,
         SlideBounds Bounds,
         bool IsTitle,
-        List<string> Paragraphs)
+        IReadOnlyList<SlideTextBlock> Blocks)
     {
         public bool HasBounds => Bounds.Width > 0 || Bounds.Height > 0;
+        public List<SlideTextParagraph> Paragraphs =>
+            EnumerateParagraphs(Blocks).ToList();
     }
+
+    private sealed record ExtractedSlideText(
+        List<string> PlainParagraphs,
+        SlideTextParagraph? Title,
+        IReadOnlyList<SlideTextBlock> Blocks);
 
     private sealed record RelatedContent(string Hash, byte[]? PreviewBytes);
 }
@@ -846,6 +1238,10 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
             LeftBodySegments = item.LeftBodySegments,
             RightTitleSegments = item.RightTitleSegments,
             RightBodySegments = item.RightBodySegments,
+            LeftTitleContent = item.LeftTitleContent,
+            LeftBodyContent = item.LeftBodyContent,
+            RightTitleContent = item.RightTitleContent,
+            RightBodyContent = item.RightBodyContent,
             LeftSlide = item.LeftSlide,
             RightSlide = item.RightSlide,
             ElementChanges = item.ElementChanges
@@ -874,6 +1270,8 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
                 RightCallout = "New slide",
                 RightTitleSegments = MarkAll(right.Title, DiffKind.Added),
                 RightBodySegments = MarkAll(FormatBody(right), DiffKind.Added),
+                RightTitleContent = CreateTitleContent(right),
+                RightBodyContent = right.TextContent,
                 RightSlide = right,
                 ElementChanges = right.Elements
                     .Select(element => new SlideElementChange(
@@ -903,6 +1301,8 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
                 RightCallout = "Removed slide",
                 LeftTitleSegments = MarkAll(left.Title, DiffKind.Removed),
                 LeftBodySegments = MarkAll(FormatBody(left), DiffKind.Removed),
+                LeftTitleContent = CreateTitleContent(left),
+                LeftBodyContent = left.TextContent,
                 LeftSlide = left,
                 ElementChanges = left.Elements
                     .Select(element => new SlideElementChange(
@@ -957,6 +1357,10 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
             RightTitleSegments = titleDiff.Right,
             LeftBodySegments = bodyDiff.Left,
             RightBodySegments = bodyDiff.Right,
+            LeftTitleContent = CreateTitleContent(left),
+            LeftBodyContent = left.TextContent,
+            RightTitleContent = CreateTitleContent(right),
+            RightBodyContent = right.TextContent,
             LeftSlide = left,
             RightSlide = right,
             ElementChanges = elementChanges
@@ -965,6 +1369,11 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
 
     private static string FormatBody(PresentationSlide slide) =>
         string.Join(Environment.NewLine + Environment.NewLine, slide.Paragraphs.Skip(1));
+
+    private static IReadOnlyList<SlideTextBlock> CreateTitleContent(PresentationSlide slide) =>
+        slide.TitleContent is null
+            ? []
+            : [new SlideTextParagraphBlock(slide.TitleContent)];
 
     private static string DescribeDifferences(
         string label,

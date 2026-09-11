@@ -11,7 +11,50 @@ public sealed record PresentationSlide(
     long Width,
     long Height,
     IReadOnlyList<SlideElement> Elements,
-    string? RenderedImagePath = null);
+    string? RenderedImagePath = null)
+{
+    public SlideTextParagraph? TitleContent { get; init; }
+    public IReadOnlyList<SlideTextBlock> TextContent { get; init; } = [];
+}
+
+public enum SlideTextBaseline
+{
+    Normal,
+    Subscript,
+    Superscript
+}
+
+public sealed record SlideTextStyle(
+    bool? Bold = null,
+    bool? Italic = null,
+    bool? Underline = null,
+    bool? StrikeThrough = null,
+    SlideTextBaseline Baseline = SlideTextBaseline.Normal,
+    string? Color = null,
+    double? FontSizePoints = null,
+    string? FontFamily = null);
+
+public sealed record SlideTextRun(string Text, SlideTextStyle Style);
+
+public sealed record SlideTextParagraph(IReadOnlyList<SlideTextRun> Runs)
+{
+    public string Text => string.Concat(Runs.Select(run => run.Text));
+}
+
+public abstract record SlideTextBlock;
+
+public sealed record SlideTextParagraphBlock(SlideTextParagraph Paragraph) : SlideTextBlock;
+
+public sealed record SlideTextTableCell(
+    IReadOnlyList<SlideTextParagraph> Paragraphs,
+    int ColumnSpan = 1,
+    int RowSpan = 1);
+
+public sealed record SlideTextTableRow(IReadOnlyList<SlideTextTableCell> Cells);
+
+public sealed record SlideTextTableBlock(
+    IReadOnlyList<SlideTextTableRow> Rows,
+    int ColumnCount) : SlideTextBlock;
 
 public sealed record LoadedPresentation(
     PresentationReference Source,
@@ -92,6 +135,10 @@ public sealed class SlideComparisonItem
     public IReadOnlyList<DiffSegment>? LeftBodySegments { get; init; }
     public IReadOnlyList<DiffSegment>? RightTitleSegments { get; init; }
     public IReadOnlyList<DiffSegment>? RightBodySegments { get; init; }
+    public IReadOnlyList<SlideTextBlock> LeftTitleContent { get; init; } = [];
+    public IReadOnlyList<SlideTextBlock> LeftBodyContent { get; init; } = [];
+    public IReadOnlyList<SlideTextBlock> RightTitleContent { get; init; } = [];
+    public IReadOnlyList<SlideTextBlock> RightBodyContent { get; init; } = [];
     public PresentationSlide? LeftSlide { get; init; }
     public PresentationSlide? RightSlide { get; init; }
     public IReadOnlyList<SlideElementChange> ElementChanges { get; init; } = [];
