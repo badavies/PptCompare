@@ -13,12 +13,17 @@ public partial class App : Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
 
         IFilePickerService filePicker = new WpfFilePickerService();
+        IPresentationRenderer renderer = new PowerPointPresentationRenderer();
         IPresentationSourceService presentationSource = new OpenXmlPresentationSourceService();
         IPresentationComparisonService comparisonService = new TextPresentationComparisonService();
 
         var window = new MainWindow
         {
-            DataContext = new MainWindowViewModel(filePicker, presentationSource, comparisonService)
+            DataContext = new MainWindowViewModel(
+                filePicker,
+                presentationSource,
+                comparisonService,
+                renderer)
         };
 
         MainWindow = window;
