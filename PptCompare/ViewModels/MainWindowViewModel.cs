@@ -31,21 +31,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private LoadedPresentation? _leftPresentation;
     private LoadedPresentation? _rightPresentation;
     private bool _isBusy;
-    private bool _isLeftPreviewRendering;
-    private bool _isRightPreviewRendering;
     private bool _disposed;
     private bool _hasCompared;
     private bool _comparisonRefreshPending;
-    private VersionDescriptor? _selectedLeftVersion;
-    private VersionDescriptor? _selectedRightVersion;
-    private SlideComparisonItem? _selectedSlide;
-    private string _statusMessage = "Ready — select a presentation on each side.";
-    private string _leftPaneHeading = "No left presentation selected";
-    private string _rightPaneHeading = "No right presentation selected";
-    private string _changedCountText = "0 changed";
-    private string _addedCountText = "0 added";
-    private string _removedCountText = "0 removed";
-    private string _movedCountText = "0 moved";
     private ApplicationSettings _settings;
     private double _outputTextFontSize;
 
@@ -106,10 +94,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public VersionDescriptor? SelectedLeftVersion
     {
-        get => _selectedLeftVersion;
+        get;
         set
         {
-            if (SetProperty(ref _selectedLeftVersion, value) && value is not null)
+            if (SetProperty(ref field, value) && value is not null)
             {
                 LeftPaneHeading = value.DisplayName;
             }
@@ -118,63 +106,59 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public VersionDescriptor? SelectedRightVersion
     {
-        get => _selectedRightVersion;
+        get;
         set
         {
-            if (SetProperty(ref _selectedRightVersion, value) && value is not null)
+            if (SetProperty(ref field, value) && value is not null)
             {
                 RightPaneHeading = value.DisplayName;
             }
         }
     }
 
-    public SlideComparisonItem? SelectedSlide
-    {
-        get => _selectedSlide;
-        set => SetProperty(ref _selectedSlide, value);
-    }
+    public SlideComparisonItem? SelectedSlide { get; set => SetProperty(ref field, value); }
 
     public string StatusMessage
     {
-        get => _statusMessage;
-        private set => SetProperty(ref _statusMessage, value);
-    }
+        get;
+        private set => SetProperty(ref field, value);
+    } = "Ready — select a presentation on each side.";
 
     public string LeftPaneHeading
     {
-        get => _leftPaneHeading;
-        private set => SetProperty(ref _leftPaneHeading, value);
-    }
+        get;
+        private set => SetProperty(ref field, value);
+    } = "No left presentation selected";
 
     public string RightPaneHeading
     {
-        get => _rightPaneHeading;
-        private set => SetProperty(ref _rightPaneHeading, value);
-    }
+        get;
+        private set => SetProperty(ref field, value);
+    } = "No right presentation selected";
 
     public string ChangedCountText
     {
-        get => _changedCountText;
-        private set => SetProperty(ref _changedCountText, value);
-    }
+        get;
+        private set => SetProperty(ref field, value);
+    } = "0 changed";
 
     public string AddedCountText
     {
-        get => _addedCountText;
-        private set => SetProperty(ref _addedCountText, value);
-    }
+        get;
+        private set => SetProperty(ref field, value);
+    } = "0 added";
 
     public string RemovedCountText
     {
-        get => _removedCountText;
-        private set => SetProperty(ref _removedCountText, value);
-    }
+        get;
+        private set => SetProperty(ref field, value);
+    } = "0 removed";
 
     public string MovedCountText
     {
-        get => _movedCountText;
-        private set => SetProperty(ref _movedCountText, value);
-    }
+        get;
+        private set => SetProperty(ref field, value);
+    } = "0 moved";
 
     public double OutputTextFontSize
     {
@@ -184,14 +168,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public bool IsLeftPreviewRendering
     {
-        get => _isLeftPreviewRendering;
-        private set => SetProperty(ref _isLeftPreviewRendering, value);
+        get;
+        private set => SetProperty(ref field, value);
     }
 
     public bool IsRightPreviewRendering
     {
-        get => _isRightPreviewRendering;
-        private set => SetProperty(ref _isRightPreviewRendering, value);
+        get;
+        private set => SetProperty(ref field, value);
     }
 
     public ICommand OpenPresentationCommand => _openPresentationCommand;
@@ -217,11 +201,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            var side = parameter as string;
-            if (side is null)
-            {
-                side = _leftPresentation is null ? "Left" : "Right";
-            }
+            var side = parameter as string ?? (_leftPresentation is null ? "Left" : "Right");
 
             var fileName = Path.GetFileName(path);
             var displayName = $"Local · {fileName}";
@@ -373,13 +353,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     _rightPresentation,
                     _lifetimeCancellation.Token);
                 ApplyComparisonResult(result, selectedSlideNumber);
-                StatusMessage = "Left and right presentations switched.";
             }
             else
             {
                 SwapDisplayedComparison(selectedSlideNumber);
-                StatusMessage = "Left and right presentations switched.";
             }
+
+            StatusMessage = "Left and right presentations switched.";
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
@@ -569,7 +549,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             RightBodyContent = item.LeftBodyContent,
             LeftSlide = item.RightSlide,
             RightSlide = item.LeftSlide,
-            ElementChanges = item.ElementChanges.Select(ReverseElementChange).ToList()
+            ElementChanges = [.. item.ElementChanges.Select(ReverseElementChange)]
         };
     }
 
@@ -633,11 +613,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         _isBusy = false;
         RaiseCommandCanExecuteChanged();
-        if (_comparisonRefreshPending && _hasCompared && !_disposed)
+        if (!_comparisonRefreshPending || !_hasCompared || _disposed)
         {
-            _comparisonRefreshPending = false;
-            _ = RefreshComparisonAfterRenderingAsync();
+            return;
         }
+
+        _comparisonRefreshPending = false;
+        _ = RefreshComparisonAfterRenderingAsync();
     }
 
     [SuppressMessage(

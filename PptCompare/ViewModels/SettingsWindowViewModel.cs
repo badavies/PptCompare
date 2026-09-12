@@ -6,98 +6,40 @@ namespace PptCompare.ViewModels;
 
 public sealed class SettingsWindowViewModel : ObservableObject
 {
-    private string _outputFontSizePoints = string.Empty;
-    private string _maxFileSizeMb = string.Empty;
-    private string _maxSlides = string.Empty;
-    private string _maxElementsPerSlide = string.Empty;
-    private string _maxTableCellsPerSlide = string.Empty;
-    private string _maxParagraphsPerSlide = string.Empty;
-    private string _maxCharactersPerSlide = string.Empty;
-    private string _maxTotalCharacters = string.Empty;
-    private string _maxEmbeddedItemSizeMb = string.Empty;
-    private string _maxPreviewImageSizeMb = string.Empty;
-    private string _maxTotalPreviewImageSizeMb = string.Empty;
-    private bool _usePowerPointRendering;
-    private bool _enableDebugLogging;
-
     public SettingsWindowViewModel(ApplicationSettings settings) => Load(settings);
 
-    public string OutputFontSizePoints
-    {
-        get => _outputFontSizePoints;
-        set => SetProperty(ref _outputFontSizePoints, value);
-    }
+    public string OutputFontSizePoints { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxFileSizeMb
-    {
-        get => _maxFileSizeMb;
-        set => SetProperty(ref _maxFileSizeMb, value);
-    }
+    public string MaxFileSizeMb { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxSlides
-    {
-        get => _maxSlides;
-        set => SetProperty(ref _maxSlides, value);
-    }
+    public string MaxSlides { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxElementsPerSlide
-    {
-        get => _maxElementsPerSlide;
-        set => SetProperty(ref _maxElementsPerSlide, value);
-    }
+    public string MaxElementsPerSlide { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxTableCellsPerSlide
-    {
-        get => _maxTableCellsPerSlide;
-        set => SetProperty(ref _maxTableCellsPerSlide, value);
-    }
+    public string MaxTableCellsPerSlide { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxParagraphsPerSlide
-    {
-        get => _maxParagraphsPerSlide;
-        set => SetProperty(ref _maxParagraphsPerSlide, value);
-    }
+    public string MaxParagraphsPerSlide { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxCharactersPerSlide
-    {
-        get => _maxCharactersPerSlide;
-        set => SetProperty(ref _maxCharactersPerSlide, value);
-    }
+    public string MaxCharactersPerSlide { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxTotalCharacters
-    {
-        get => _maxTotalCharacters;
-        set => SetProperty(ref _maxTotalCharacters, value);
-    }
+    public string MaxTotalCharacters { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxEmbeddedItemSizeMb
-    {
-        get => _maxEmbeddedItemSizeMb;
-        set => SetProperty(ref _maxEmbeddedItemSizeMb, value);
-    }
+    public string MaxEmbeddedItemSizeMb { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxPreviewImageSizeMb
-    {
-        get => _maxPreviewImageSizeMb;
-        set => SetProperty(ref _maxPreviewImageSizeMb, value);
-    }
+    public string MaxPreviewImageSizeMb { get; set => SetProperty(ref field, value); } = string.Empty;
 
-    public string MaxTotalPreviewImageSizeMb
-    {
-        get => _maxTotalPreviewImageSizeMb;
-        set => SetProperty(ref _maxTotalPreviewImageSizeMb, value);
-    }
+    public string MaxTotalPreviewImageSizeMb { get; set => SetProperty(ref field, value); } = string.Empty;
 
     public bool UsePowerPointRendering
     {
-        get => _usePowerPointRendering;
-        set => SetProperty(ref _usePowerPointRendering, value);
+        get;
+        set => SetProperty(ref field, value);
     }
 
     public bool EnableDebugLogging
     {
-        get => _enableDebugLogging;
-        set => SetProperty(ref _enableDebugLogging, value);
+        get;
+        set => SetProperty(ref field, value);
     }
 
     public void RestoreDefaults() => Load(new ApplicationSettings());

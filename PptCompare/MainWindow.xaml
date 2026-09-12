@@ -56,7 +56,7 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Image Source="Assets/PptCompareIcon.png" Width="34" Height="34"
+                    <Image Source="Assets/PptCompareIcon.png" Width="50" Height="50"
                            Stretch="Uniform" Margin="0,0,12,0"
                            SnapsToDevicePixels="True"
                            RenderOptions.BitmapScalingMode="HighQuality" />

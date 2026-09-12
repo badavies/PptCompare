@@ -104,7 +104,7 @@ public sealed class HardeningTests
     {
         var testRoot = CreateTestDirectory();
         var presentationPath = Path.Combine(testRoot, "source.pptx");
-        await File.WriteAllBytesAsync(presentationPath, [1, 2, 3, 4]);
+        await File.WriteAllBytesAsync(presentationPath, [1, 2, 3, 4], TestContext.CancellationToken);
         var detector = new StubPowerPointProcessDetector(isRunning: true);
         var application = new FakePowerPointApplication(userPresentationCount);
         var applicationFactory = new StubPowerPointApplicationFactory(application);
@@ -120,7 +120,7 @@ public sealed class HardeningTests
                 launcher,
                 FastWarmStartOptions);
 
-            var result = await renderer.RenderAsync(presentationPath, 1);
+            var result = await renderer.RenderAsync(presentationPath, 1, TestContext.CancellationToken);
 
             Assert.AreEqual(1, detector.CallCount);
             Assert.AreEqual(1, applicationFactory.CreateCount);
@@ -149,7 +149,7 @@ public sealed class HardeningTests
     {
         var testRoot = CreateTestDirectory();
         var presentationPath = Path.Combine(testRoot, "source.pptx");
-        await File.WriteAllBytesAsync(presentationPath, [1, 2, 3, 4]);
+        await File.WriteAllBytesAsync(presentationPath, [1, 2, 3, 4], TestContext.CancellationToken);
         var detector = new StubPowerPointProcessDetector(isRunning: false);
         var application = new FakePowerPointApplication(
             userPresentationCount: 0,
@@ -166,7 +166,7 @@ public sealed class HardeningTests
                 launcher,
                 FastWarmStartOptions);
 
-            var result = await renderer.RenderAsync(presentationPath, 1);
+            var result = await renderer.RenderAsync(presentationPath, 1, TestContext.CancellationToken);
 
             Assert.AreEqual(1, result.SlideImages.Count);
             Assert.IsTrue(application.Presentations.PreviewPresentationClosed);
@@ -186,7 +186,7 @@ public sealed class HardeningTests
         const int serverExecutionFailed = unchecked((int)0x80080005);
         var testRoot = CreateTestDirectory();
         var presentationPath = Path.Combine(testRoot, "confidential-board-plan.pptx");
-        await File.WriteAllBytesAsync(presentationPath, [1, 2, 3, 4]);
+        await File.WriteAllBytesAsync(presentationPath, [1, 2, 3, 4], TestContext.CancellationToken);
         var diagnostics = new RecordingDetailedDiagnostics();
         diagnostics.SetDebugLoggingEnabled(true);
         var activationException = Marshal.GetExceptionForHR(serverExecutionFailed)
@@ -204,7 +204,7 @@ public sealed class HardeningTests
                 launcher,
                 FastWarmStartOptions);
 
-            var result = await renderer.RenderAsync(presentationPath, 1);
+            var result = await renderer.RenderAsync(presentationPath, 1, TestContext.CancellationToken);
 
             Assert.AreEqual(0, result.SlideImages.Count);
             StringAssert.Contains(result.Status, "PowerPoint could not start");
@@ -388,40 +388,26 @@ public sealed class HardeningTests
         public string CreateSupportSummary() => string.Empty;
     }
 
-    public sealed class FakePowerPointApplication
+    public sealed class FakePowerPointApplication(int userPresentationCount, Action? onQuit = null)
     {
-        private readonly Action? _onQuit;
-
-        public FakePowerPointApplication(int userPresentationCount, Action? onQuit = null)
-        {
-            Presentations = new FakePowerPointPresentations(userPresentationCount);
-            _onQuit = onQuit;
-        }
-
         public int AutomationSecurity { get; set; } = 2;
 
-        public FakePowerPointPresentations Presentations { get; }
+        public FakePowerPointPresentations Presentations { get; } = new(userPresentationCount);
 
         public bool QuitCalled { get; private set; }
 
         public void Quit()
         {
             QuitCalled = true;
-            _onQuit?.Invoke();
+            onQuit?.Invoke();
         }
     }
 
-    public sealed class FakePowerPointPresentations
+    public sealed class FakePowerPointPresentations(int userPresentationCount)
     {
-        private readonly int _userPresentationCount;
         private bool _previewPresentationOpen;
 
-        public FakePowerPointPresentations(int userPresentationCount)
-        {
-            _userPresentationCount = userPresentationCount;
-        }
-
-        public int Count => _userPresentationCount + (_previewPresentationOpen ? 1 : 0);
+        public int Count => userPresentationCount + (_previewPresentationOpen ? 1 : 0);
 
         public string OpenedPath { get; private set; } = string.Empty;
 
@@ -474,18 +460,15 @@ public sealed class HardeningTests
 
     public sealed class FakePowerPointSlides
     {
-        private readonly int _count = 1;
-
-        public int Count => _count;
+        public int Count { get; } = 1;
     }
 
     public sealed class FakePowerPointPageSetup
     {
-        private readonly double _slideWidth = 960;
-        private readonly double _slideHeight = 540;
+        public double SlideWidth { get; } = 960;
 
-        public double SlideWidth => _slideWidth;
-
-        public double SlideHeight => _slideHeight;
+        public double SlideHeight { get; } = 540;
     }
+
+    public TestContext TestContext { get; set; } = null!;
 }
