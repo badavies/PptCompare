@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Security;
+using Microsoft.Win32;
 using PptCompare.Models;
 
 namespace PptCompare.Services;
@@ -19,9 +20,13 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     private readonly object _renderFolderGate = new();
     private readonly SemaphoreSlim _renderSemaphore = new(1, 1);
     private readonly Queue<string> _renderFolders = new();
+    private readonly IPowerPointApplicationFactory _applicationFactory;
     private readonly IApplicationDiagnostics _diagnostics;
+    private readonly IPowerPointProcessLauncher _powerPointProcessLauncher;
+    private readonly IPowerPointProcessDetector _powerPointProcessDetector;
     private readonly string _renderRoot;
     private readonly TimeProvider _timeProvider;
+    private readonly PowerPointWarmStartOptions _warmStartOptions;
     private bool _disposed;
 
     public PowerPointPresentationRenderer()
@@ -33,19 +38,32 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         : this(
             diagnostics,
             Path.Combine(Path.GetTempPath(), "PptCompare", "renders"),
-            TimeProvider.System)
+            TimeProvider.System,
+            new SystemPowerPointProcessDetector(),
+            new ComPowerPointApplicationFactory(),
+            new RegisteredPowerPointProcessLauncher(),
+            PowerPointWarmStartOptions.Default)
     {
     }
 
     internal PowerPointPresentationRenderer(
         IApplicationDiagnostics diagnostics,
         string renderRoot,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        IPowerPointProcessDetector? powerPointProcessDetector = null,
+        IPowerPointApplicationFactory? applicationFactory = null,
+        IPowerPointProcessLauncher? powerPointProcessLauncher = null,
+        PowerPointWarmStartOptions? warmStartOptions = null)
     {
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         ArgumentException.ThrowIfNullOrWhiteSpace(renderRoot);
         _renderRoot = Path.GetFullPath(renderRoot);
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _powerPointProcessDetector = powerPointProcessDetector ?? new SystemPowerPointProcessDetector();
+        _applicationFactory = applicationFactory ?? new ComPowerPointApplicationFactory();
+        _powerPointProcessLauncher = powerPointProcessLauncher ?? new RegisteredPowerPointProcessLauncher();
+        _warmStartOptions = warmStartOptions ?? PowerPointWarmStartOptions.Default;
+        _warmStartOptions.Validate();
         CleanupStaleRenderFolders();
     }
 
@@ -61,13 +79,37 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         await _renderSemaphore.WaitAsync(cancellationToken);
         try
         {
-            var applicationType = Type.GetTypeFromProgID("PowerPoint.Application");
-            if (applicationType is null)
+            var trace = new PowerPointRenderTrace(_diagnostics);
+            trace.Record("request", $"slides={slideCount.ToString(CultureInfo.InvariantCulture)}");
+            bool isPowerPointInstalled;
+            try
+            {
+                trace.Record("installation-check-started");
+                isPowerPointInstalled = _applicationFactory.IsPowerPointInstalled();
+                trace.Record(
+                    "installation-check-completed",
+                    $"installed={isPowerPointInstalled.ToString(CultureInfo.InvariantCulture)}");
+            }
+            catch (Exception exception)
+            {
+                trace.RecordFailure("installation-check", exception);
+                _diagnostics.RecordException("PowerPointInstallationCheckFailed", exception);
+                return new SlideRenderingResult(
+                    new Dictionary<int, string>(),
+                    "Microsoft PowerPoint could not be inspected; using the built-in slide preview.");
+            }
+
+            if (!isPowerPointInstalled)
             {
                 return new SlideRenderingResult(
                     new Dictionary<int, string>(),
                     "Microsoft PowerPoint was not found; using the built-in slide preview.");
             }
+
+            var powerPointWasAlreadyRunning = DetectExistingPowerPointSession();
+            trace.Record(
+                "process-check-completed",
+                $"alreadyRunning={powerPointWasAlreadyRunning.ToString(CultureInfo.InvariantCulture)}");
 
             using var renderCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken);
@@ -75,9 +117,10 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var thread = new Thread(() =>
                 RenderOnStaThread(
-                    applicationType,
                     presentationPath,
                     slideCount,
+                    powerPointWasAlreadyRunning,
+                    trace,
                     completion,
                     renderCancellation.Token))
             {
@@ -97,6 +140,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 Debug.WriteLine(
                     $"PowerPoint rendering timed out after {RenderTimeout.TotalSeconds:N0} seconds.");
                 _diagnostics.RecordEvent("PreviewRenderTimedOut");
+                trace.Record("timed-out");
                 return new SlideRenderingResult(
                     new Dictionary<int, string>(),
                     "PowerPoint rendering timed out; using the built-in slide preview.");
@@ -113,9 +157,10 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         "CA1031:Do not catch general exception types",
         Justification = "Optional Office automation must fail closed and return the built-in renderer fallback.")]
     private void RenderOnStaThread(
-        Type applicationType,
         string presentationPath,
         int expectedSlideCount,
+        bool powerPointWasAlreadyRunning,
+        PowerPointRenderTrace trace,
         TaskCompletionSource<SlideRenderingResult> completion,
         CancellationToken cancellationToken)
     {
@@ -125,24 +170,66 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         object? slides = null;
         object? pageSetup = null;
         string? outputFolder = null;
+        string? stagedPresentationPath = null;
+        SlideRenderingResult? renderingResult = null;
+        var operationCancelled = false;
+        var ownedPresentationClosed = true;
+        int? originalAutomationSecurity = null;
+        var automationSecurityNeedsRestoring = false;
+        var stage = "initialization";
 
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            stage = "temporary-copy";
+            trace.Record("temporary-copy-started");
             outputFolder = CreateRenderFolder();
-            application = Activator.CreateInstance(applicationType)
-                ?? throw new InvalidOperationException("PowerPoint could not be started.");
+            stagedPresentationPath = CreateStagedPresentationCopy(
+                presentationPath,
+                outputFolder);
+            trace.Record("temporary-copy-completed");
 
+            if (!powerPointWasAlreadyRunning)
+            {
+                stage = "application-warm-start";
+                WarmStartPowerPoint(trace, cancellationToken);
+            }
+
+            stage = "application-activation";
+            application = CreatePowerPointApplicationWithRetry(trace, cancellationToken);
+
+            stage = "automation-security";
             dynamic powerPoint = application;
+            originalAutomationSecurity = Convert.ToInt32(
+                powerPoint.AutomationSecurity,
+                CultureInfo.InvariantCulture);
             powerPoint.AutomationSecurity = 3; // msoAutomationSecurityForceDisable
+            automationSecurityNeedsRestoring = true;
+            trace.Record("automation-security-configured");
             presentations = powerPoint.Presentations;
             dynamic presentationCollection = presentations;
-            presentation = presentationCollection.Open(
-                presentationPath,
-                -1, // ReadOnly: msoTrue
-                0,  // Untitled: msoFalse
-                0); // WithWindow: msoFalse
+            stage = "presentation-open";
+            trace.Record("presentation-open-started");
+            try
+            {
+                presentation = presentationCollection.Open(
+                    stagedPresentationPath,
+                    -1, // ReadOnly: msoTrue
+                    0,  // Untitled: msoFalse
+                    0); // WithWindow: msoFalse
+            }
+            finally
+            {
+                automationSecurityNeedsRestoring = !TryRestoreAutomationSecurity(
+                    application,
+                    originalAutomationSecurity.Value);
+                trace.Record(
+                    "automation-security-restored",
+                    $"restored={(!automationSecurityNeedsRestoring).ToString(CultureInfo.InvariantCulture)}");
+            }
+            trace.Record("presentation-open-completed");
 
+            stage = "presentation-inspection";
             dynamic openedPresentation = presentation;
             slides = openedPresentation.Slides;
             dynamic slideCollection = slides;
@@ -157,6 +244,8 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
             var bulkFolder = Path.Combine(outputFolder, "bulk");
             Directory.CreateDirectory(bulkFolder);
             Dictionary<int, string> images;
+            stage = "bulk-export";
+            trace.Record("bulk-export-started");
             try
             {
                 openedPresentation.Export(
@@ -166,12 +255,16 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                     exportSize.Height);
                 cancellationToken.ThrowIfCancellationRequested();
                 images = CollectExportedImages(bulkFolder, count);
+                trace.Record(
+                    "bulk-export-completed",
+                    $"images={images.Count.ToString(CultureInfo.InvariantCulture)}");
             }
             catch (Exception exception) when (
                 exception is COMException or IOException or UnauthorizedAccessException)
             {
                 Debug.WriteLine($"Whole-presentation PowerPoint export failed: {exception}");
                 _diagnostics.RecordException("PreviewBulkExportFailed", exception);
+                trace.RecordFailure("bulk-export", exception);
                 images = [];
             }
 
@@ -180,6 +273,8 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 // Some older or repaired decks fail whole-presentation export even though
                 // PowerPoint can render their slides individually.
                 DeleteRenderFolder(bulkFolder);
+                stage = "individual-export";
+                trace.Record("individual-export-started");
                 images = ExportSlidesIndividually(
                     slideCollection,
                     outputFolder,
@@ -187,62 +282,392 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                     exportSize.Width,
                     exportSize.Height,
                     cancellationToken);
+                trace.Record(
+                    "individual-export-completed",
+                    $"images={images.Count.ToString(CultureInfo.InvariantCulture)}");
             }
 
-            RememberRenderFolder(outputFolder);
-            completion.TrySetResult(new SlideRenderingResult(
+            stage = "render-completed";
+            renderingResult = new SlideRenderingResult(
                 images,
                 images.Count == count
                     ? "High-fidelity slide previews rendered by Microsoft PowerPoint."
-                    : "Some slides could not be rendered; using built-in previews where necessary."));
-            outputFolder = null;
+                    : "Some slides could not be rendered; using built-in previews where necessary.");
+            trace.Record(
+                stage,
+                $"images={images.Count.ToString(CultureInfo.InvariantCulture)}");
         }
         catch (OperationCanceledException)
         {
-            completion.TrySetCanceled(cancellationToken);
+            operationCancelled = true;
+            trace.Record("cancelled", $"lastStage={stage}");
         }
         catch (Exception exception)
         {
             Debug.WriteLine($"PowerPoint rendering failed: {exception}");
             _diagnostics.RecordException("PreviewRenderFailed", exception);
-            completion.TrySetResult(new SlideRenderingResult(
+            trace.RecordFailure(stage, exception);
+            if (string.Equals(stage, "application-activation", StringComparison.Ordinal))
+            {
+                RecordProcessStateAfterActivationFailure(trace);
+            }
+
+            renderingResult = new SlideRenderingResult(
                 new Dictionary<int, string>(),
-                GetRenderingFailureStatus(exception)));
+                GetRenderingFailureStatus(exception));
         }
         finally
         {
-            try
+            if (automationSecurityNeedsRestoring &&
+                originalAutomationSecurity is { } security)
             {
-                if (presentation is not null)
-                {
-                    ((dynamic)presentation).Close();
-                }
-            }
-            catch (COMException)
-            {
+                TryRestoreAutomationSecurity(application, security);
             }
 
+            if (presentation is not null)
+            {
+                trace.Record("presentation-close-started");
+                ownedPresentationClosed = TryCloseOwnedPresentation(presentation);
+                trace.Record(
+                    "presentation-close-completed",
+                    $"closed={ownedPresentationClosed.ToString(CultureInfo.InvariantCulture)}");
+            }
+
+            var canQuitApplication = CanQuitPowerPointWithoutUserDataLoss(
+                presentations,
+                powerPointWasAlreadyRunning,
+                ownedPresentationClosed);
+            trace.Record(
+                "application-shutdown-policy",
+                $"preExisting={powerPointWasAlreadyRunning.ToString(CultureInfo.InvariantCulture)};quit={canQuitApplication.ToString(CultureInfo.InvariantCulture)}");
             ReleaseComObject(slides);
             ReleaseComObject(pageSetup);
             ReleaseComObject(presentation);
             ReleaseComObject(presentations);
 
-            try
+            if (canQuitApplication)
             {
-                if (application is not null)
+                try
                 {
-                    ((dynamic)application).Quit();
+                    trace.Record("application-quit-started");
+                    ((dynamic)application!).Quit();
+                    trace.Record("application-quit-completed");
+                    WaitForPowerPointProcessExit(trace);
                 }
-            }
-            catch (COMException)
-            {
+                catch (COMException exception)
+                {
+                    _diagnostics.RecordException("PowerPointAutomationShutdownFailed", exception);
+                    trace.RecordFailure("application-quit", exception);
+                }
             }
 
             ReleaseComObject(application);
+            DeleteStagedPresentation(stagedPresentationPath);
+            trace.Record("temporary-copy-cleanup-requested");
+
+            if (!operationCancelled &&
+                outputFolder is not null &&
+                renderingResult is { SlideImages.Count: > 0 })
+            {
+                RememberRenderFolder(outputFolder);
+                outputFolder = null;
+            }
+
             if (outputFolder is not null)
             {
                 DeleteRenderFolder(outputFolder);
             }
+
+            if (operationCancelled)
+            {
+                completion.TrySetCanceled(cancellationToken);
+            }
+            else
+            {
+                trace.Record("cleanup-completed");
+                completion.TrySetResult(renderingResult ?? new SlideRenderingResult(
+                    new Dictionary<int, string>(),
+                    "PowerPoint rendering was unavailable; using the built-in slide preview."));
+            }
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "Failure to inspect running processes must assume a shared session so it can never be terminated.")]
+    private bool DetectExistingPowerPointSession()
+    {
+        try
+        {
+            var isRunning = _powerPointProcessDetector.IsPowerPointRunning();
+            if (isRunning)
+            {
+                _diagnostics.RecordEvent("PreviewRenderingUsingExistingPowerPoint");
+            }
+
+            return isRunning;
+        }
+        catch (Exception exception)
+        {
+            _diagnostics.RecordException("PowerPointProcessInspectionFailed", exception);
+            return true;
+        }
+    }
+
+    private void WarmStartPowerPoint(
+        PowerPointRenderTrace trace,
+        CancellationToken cancellationToken)
+    {
+        trace.Record("warm-start-launch-started");
+        _powerPointProcessLauncher.StartPowerPoint();
+        trace.Record("warm-start-launch-requested");
+
+        var wait = Stopwatch.StartNew();
+        while (wait.Elapsed < _warmStartOptions.ProcessStartTimeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_powerPointProcessDetector.IsPowerPointRunning())
+            {
+                trace.Record(
+                    "warm-start-process-detected",
+                    $"waitMs={wait.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)}");
+                WaitWithCancellation(
+                    _warmStartOptions.AutomationReadyDelay,
+                    cancellationToken);
+                trace.Record("warm-start-ready-delay-completed");
+                return;
+            }
+
+            WaitWithCancellation(_warmStartOptions.ProcessPollInterval, cancellationToken);
+        }
+
+        throw new TimeoutException("PowerPoint did not start within the permitted time.");
+    }
+
+    private object CreatePowerPointApplicationWithRetry(
+        PowerPointRenderTrace trace,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= _warmStartOptions.MaxActivationAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            trace.Record(
+                "application-activation-started",
+                $"attempt={attempt.ToString(CultureInfo.InvariantCulture)}");
+            try
+            {
+                var application = _applicationFactory.CreateApplication();
+                trace.Record(
+                    "application-activation-completed",
+                    $"attempt={attempt.ToString(CultureInfo.InvariantCulture)}");
+                return application;
+            }
+            catch (COMException exception) when (
+                exception.HResult == ComServerExecutionFailed &&
+                attempt < _warmStartOptions.MaxActivationAttempts)
+            {
+                trace.RecordFailure($"application-activation-attempt-{attempt}", exception);
+                if (!_powerPointProcessDetector.IsPowerPointRunning())
+                {
+                    throw;
+                }
+
+                WaitWithCancellation(_warmStartOptions.ActivationRetryDelay, cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException("PowerPoint automation activation did not complete.");
+    }
+
+    private void WaitForPowerPointProcessExit(PowerPointRenderTrace trace)
+    {
+        var wait = Stopwatch.StartNew();
+        while (wait.Elapsed < _warmStartOptions.ProcessExitTimeout)
+        {
+            try
+            {
+                if (!_powerPointProcessDetector.IsPowerPointRunning())
+                {
+                    trace.Record(
+                        "application-process-exit-detected",
+                        $"waitMs={wait.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)}");
+                    return;
+                }
+            }
+            catch (Exception exception)
+            {
+                trace.RecordFailure("application-process-exit-check", exception);
+                return;
+            }
+
+            WaitWithCancellation(
+                _warmStartOptions.ProcessPollInterval,
+                CancellationToken.None);
+        }
+
+        trace.Record("application-process-exit-wait-expired");
+    }
+
+    private static void WaitWithCancellation(
+        TimeSpan delay,
+        CancellationToken cancellationToken)
+    {
+        if (delay <= TimeSpan.Zero)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return;
+        }
+
+        if (cancellationToken.WaitHandle.WaitOne(delay))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+
+    private void RecordProcessStateAfterActivationFailure(PowerPointRenderTrace trace)
+    {
+        if (!trace.IsEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var isRunning = _powerPointProcessDetector.IsPowerPointRunning();
+            trace.Record(
+                "activation-failure-process-check",
+                $"running={isRunning.ToString(CultureInfo.InvariantCulture)}");
+        }
+        catch (Exception exception)
+        {
+            trace.RecordFailure("activation-failure-process-check", exception);
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "Failure to restore an application-wide setting is logged and retried during cleanup.")]
+    private bool TryRestoreAutomationSecurity(object? application, int originalValue)
+    {
+        if (application is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            ((dynamic)application).AutomationSecurity = originalValue;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _diagnostics.RecordException("PowerPointAutomationSecurityRestoreFailed", exception);
+            return false;
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "A failed close must leave the shared PowerPoint application running and return the built-in fallback safely.")]
+    private bool TryCloseOwnedPresentation(object presentation)
+    {
+        try
+        {
+            ((dynamic)presentation).Close();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _diagnostics.RecordException("PowerPointPreviewCloseFailed", exception);
+            return false;
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "An uncertain PowerPoint state must fail closed and leave the application running.")]
+    private bool CanQuitPowerPointWithoutUserDataLoss(
+        object? presentationCollection,
+        bool powerPointWasAlreadyRunning,
+        bool ownedPresentationClosed)
+    {
+        if (powerPointWasAlreadyRunning)
+        {
+            _diagnostics.RecordEvent(
+                "PowerPointAutomationShutdownSkipped",
+                "reason=pre-existing-session");
+            return false;
+        }
+
+        if (!ownedPresentationClosed)
+        {
+            _diagnostics.RecordEvent(
+                "PowerPointAutomationShutdownSkipped",
+                "reason=preview-close-failed");
+            return false;
+        }
+
+        if (presentationCollection is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            dynamic presentations = presentationCollection;
+            var openPresentationCount = (int)presentations.Count;
+            if (openPresentationCount == 0)
+            {
+                return true;
+            }
+
+            _diagnostics.RecordEvent(
+                "PowerPointAutomationShutdownSkipped",
+                $"openPresentations={openPresentationCount.ToString(CultureInfo.InvariantCulture)}");
+            return false;
+        }
+        catch (Exception exception)
+        {
+            _diagnostics.RecordException("PowerPointShutdownSafetyCheckFailed", exception);
+            return false;
+        }
+    }
+
+    private static string CreateStagedPresentationCopy(
+        string presentationPath,
+        string outputFolder)
+    {
+        var sourcePath = Path.GetFullPath(presentationPath);
+        var extension = Path.GetExtension(sourcePath);
+        if (!extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase) &&
+            !extension.Equals(".pptm", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new NotSupportedException(
+                "Only .pptx and .pptm presentations can be rendered.");
+        }
+
+        var stagingFolder = Path.Combine(outputFolder, "source");
+        Directory.CreateDirectory(stagingFolder);
+        var stagedPath = Path.Combine(stagingFolder, $"preview{extension.ToLowerInvariant()}");
+        File.Copy(sourcePath, stagedPath, overwrite: false);
+        return stagedPath;
+    }
+
+    private void DeleteStagedPresentation(string? stagedPresentationPath)
+    {
+        if (stagedPresentationPath is null)
+        {
+            return;
+        }
+
+        var stagingFolder = Path.GetDirectoryName(stagedPresentationPath);
+        if (stagingFolder is not null && !DeleteRenderFolder(stagingFolder))
+        {
+            _diagnostics.RecordEvent("PreviewSourceCleanupDeferred");
         }
     }
 
@@ -495,6 +920,49 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
     }
 
+    private sealed class PowerPointRenderTrace
+    {
+        private readonly IDetailedApplicationDiagnostics? _diagnostics;
+        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private readonly string _renderId = Guid.NewGuid().ToString("N")[..8];
+
+        public PowerPointRenderTrace(IApplicationDiagnostics diagnostics)
+        {
+            _diagnostics = diagnostics as IDetailedApplicationDiagnostics;
+        }
+
+        public bool IsEnabled => _diagnostics is { IsDebugLoggingEnabled: true };
+
+        public void Record(string stage, string? nonSensitiveDetail = null)
+        {
+            var diagnostics = _diagnostics;
+            if (diagnostics is not { IsDebugLoggingEnabled: true })
+            {
+                return;
+            }
+
+            var detail = string.Create(
+                CultureInfo.InvariantCulture,
+                $"renderId={_renderId};stage={stage};elapsedMs={_stopwatch.ElapsedMilliseconds}");
+            if (!string.IsNullOrWhiteSpace(nonSensitiveDetail))
+            {
+                detail += $";{nonSensitiveDetail}";
+            }
+
+            diagnostics.RecordDebugEvent("PowerPointPreviewTrace", detail);
+        }
+
+        public void RecordFailure(string stage, Exception exception)
+        {
+            ArgumentNullException.ThrowIfNull(exception);
+            Record(
+                "failure",
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"failedStage={stage};hresult=0x{exception.HResult:X8};type={exception.GetType().Name}"));
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -516,5 +984,135 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
 
         GC.SuppressFinalize(this);
+    }
+}
+
+internal interface IPowerPointProcessDetector
+{
+    bool IsPowerPointRunning();
+}
+
+internal interface IPowerPointApplicationFactory
+{
+    bool IsPowerPointInstalled();
+
+    object CreateApplication();
+}
+
+internal interface IPowerPointProcessLauncher
+{
+    void StartPowerPoint();
+}
+
+internal sealed record PowerPointWarmStartOptions(
+    TimeSpan ProcessStartTimeout,
+    TimeSpan ProcessPollInterval,
+    TimeSpan AutomationReadyDelay,
+    TimeSpan ActivationRetryDelay,
+    int MaxActivationAttempts,
+    TimeSpan ProcessExitTimeout)
+{
+    public static PowerPointWarmStartOptions Default { get; } = new(
+        TimeSpan.FromSeconds(15),
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromSeconds(2),
+        TimeSpan.FromSeconds(1),
+        2,
+        TimeSpan.FromSeconds(10));
+
+    public void Validate()
+    {
+        if (ProcessStartTimeout <= TimeSpan.Zero ||
+            ProcessPollInterval <= TimeSpan.Zero ||
+            AutomationReadyDelay < TimeSpan.Zero ||
+            ActivationRetryDelay < TimeSpan.Zero ||
+            MaxActivationAttempts is < 1 or > 3 ||
+            ProcessExitTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(PowerPointWarmStartOptions),
+                "PowerPoint warm-start options are outside their supported range.");
+        }
+    }
+}
+
+internal sealed class ComPowerPointApplicationFactory : IPowerPointApplicationFactory
+{
+    public bool IsPowerPointInstalled() =>
+        Type.GetTypeFromProgID("PowerPoint.Application") is not null;
+
+    public object CreateApplication()
+    {
+        var applicationType = Type.GetTypeFromProgID("PowerPoint.Application")
+            ?? throw new InvalidOperationException("Microsoft PowerPoint is not installed.");
+        return Activator.CreateInstance(applicationType)
+            ?? throw new InvalidOperationException("PowerPoint could not be started.");
+    }
+}
+
+internal sealed class RegisteredPowerPointProcessLauncher : IPowerPointProcessLauncher
+{
+    private const string PowerPointAppPath =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\POWERPNT.EXE";
+
+    public void StartPowerPoint()
+    {
+        var executablePath = FindRegisteredPowerPointExecutable()
+            ?? throw new InvalidOperationException(
+                "The registered Microsoft PowerPoint executable could not be found.");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            UseShellExecute = false,
+            WindowStyle = ProcessWindowStyle.Minimized
+        };
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Microsoft PowerPoint did not start.");
+    }
+
+    private static string? FindRegisteredPowerPointExecutable()
+    {
+        foreach (var registryView in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, registryView);
+            using var appPathKey = baseKey.OpenSubKey(PowerPointAppPath, writable: false);
+            if (appPathKey?.GetValue(null) is not string registeredPath)
+            {
+                continue;
+            }
+
+            var expandedPath = Environment.ExpandEnvironmentVariables(registeredPath.Trim().Trim('"'));
+            if (!Path.IsPathFullyQualified(expandedPath) ||
+                !Path.GetFileName(expandedPath).Equals(
+                    "POWERPNT.EXE",
+                    StringComparison.OrdinalIgnoreCase) ||
+                !File.Exists(expandedPath))
+            {
+                continue;
+            }
+
+            return Path.GetFullPath(expandedPath);
+        }
+
+        return null;
+    }
+}
+
+internal sealed class SystemPowerPointProcessDetector : IPowerPointProcessDetector
+{
+    public bool IsPowerPointRunning()
+    {
+        var processes = Process.GetProcessesByName("POWERPNT");
+        try
+        {
+            return processes.Length > 0;
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
+        }
     }
 }

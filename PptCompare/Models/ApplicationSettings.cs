@@ -25,7 +25,8 @@ public sealed record ApplicationSettings(
     int MaxEmbeddedItemSizeMb = 100,
     int MaxPreviewImageSizeMb = 25,
     int MaxTotalPreviewImageSizeMb = 100,
-    bool UsePowerPointRendering = true)
+    bool UsePowerPointRendering = true,
+    bool EnableDebugLogging = false)
 {
     public const double MinOutputFontSizePoints = 8;
     public const double MaxOutputFontSizePoints = 24;

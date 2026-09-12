@@ -21,7 +21,16 @@ public interface IApplicationDiagnostics
     string CreateSupportSummary();
 }
 
-public sealed class FileApplicationDiagnostics : IApplicationDiagnostics
+public interface IDetailedApplicationDiagnostics
+{
+    bool IsDebugLoggingEnabled { get; }
+
+    void SetDebugLoggingEnabled(bool enabled);
+
+    void RecordDebugEvent(string eventName, string? nonSensitiveDetail = null);
+}
+
+public sealed class FileApplicationDiagnostics : IApplicationDiagnostics, IDetailedApplicationDiagnostics
 {
     private const long MaxLogBytes = 1024 * 1024;
     private const int MaxArchivedLogs = 4;
@@ -29,6 +38,7 @@ public sealed class FileApplicationDiagnostics : IApplicationDiagnostics
     private readonly object _writeGate = new();
     private readonly string _logDirectory;
     private readonly string _logPath;
+    private int _debugLoggingEnabled;
 
     public FileApplicationDiagnostics()
         : this(CreateDefaultLogDirectory())
@@ -44,8 +54,30 @@ public sealed class FileApplicationDiagnostics : IApplicationDiagnostics
 
     public string DisplayLogLocation => @"%LocalAppData%\PptCompare\Logs";
 
+    public bool IsDebugLoggingEnabled => Volatile.Read(ref _debugLoggingEnabled) != 0;
+
     public void RecordEvent(string eventName, string? nonSensitiveDetail = null) =>
         Write("INFO", eventName, nonSensitiveDetail);
+
+    public void SetDebugLoggingEnabled(bool enabled)
+    {
+        var nextValue = enabled ? 1 : 0;
+        var previousValue = Interlocked.Exchange(ref _debugLoggingEnabled, nextValue);
+        if (previousValue == nextValue)
+        {
+            return;
+        }
+
+        Write("INFO", enabled ? "DebugLoggingEnabled" : "DebugLoggingDisabled", null);
+    }
+
+    public void RecordDebugEvent(string eventName, string? nonSensitiveDetail = null)
+    {
+        if (IsDebugLoggingEnabled)
+        {
+            Write("DEBUG", eventName, nonSensitiveDetail);
+        }
+    }
 
     public void RecordException(string eventName, Exception exception)
     {
@@ -77,6 +109,7 @@ public sealed class FileApplicationDiagnostics : IApplicationDiagnostics
         builder.AppendLine(CultureInfo.InvariantCulture, $"Operating system: {RuntimeInformation.OSDescription}");
         builder.AppendLine(CultureInfo.InvariantCulture, $"Process architecture: {RuntimeInformation.ProcessArchitecture}");
         builder.AppendLine(CultureInfo.InvariantCulture, $"Open XML SDK: {openXmlVersion}");
+        builder.AppendLine(CultureInfo.InvariantCulture, $"Debug logging: {(IsDebugLoggingEnabled ? "Enabled" : "Disabled")}");
         builder.Append("Diagnostics policy: filenames, file paths and presentation content are not recorded.");
         return builder.ToString();
     }

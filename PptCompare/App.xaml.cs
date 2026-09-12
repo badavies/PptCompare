@@ -16,7 +16,6 @@ public partial class App : Application
     {
         base.OnStartup(e);
         _diagnostics = CreateDiagnostics();
-        _diagnostics.RecordEvent("ApplicationStarted", $"version={ApplicationInfo.Version}");
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
@@ -25,6 +24,12 @@ public partial class App : Application
         IPresentationRenderer renderer = new PowerPointPresentationRenderer(_diagnostics);
         var settingsService = new JsonApplicationSettingsService(_diagnostics);
         var settings = settingsService.Load();
+        if (_diagnostics is IDetailedApplicationDiagnostics detailedDiagnostics)
+        {
+            detailedDiagnostics.SetDebugLoggingEnabled(settings.EnableDebugLogging);
+        }
+
+        _diagnostics.RecordEvent("ApplicationStarted", $"version={ApplicationInfo.Version}");
         IPresentationSourceService presentationSource = new OpenXmlPresentationSourceService(settings.ToReadLimits());
         IPresentationComparisonService comparisonService = new TextPresentationComparisonService();
         ISettingsDialogService settingsDialog = new WpfSettingsDialogService();

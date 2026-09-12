@@ -18,6 +18,7 @@ public sealed class SettingsWindowViewModel : ObservableObject
     private string _maxPreviewImageSizeMb = string.Empty;
     private string _maxTotalPreviewImageSizeMb = string.Empty;
     private bool _usePowerPointRendering;
+    private bool _enableDebugLogging;
 
     public SettingsWindowViewModel(ApplicationSettings settings) => Load(settings);
 
@@ -93,6 +94,12 @@ public sealed class SettingsWindowViewModel : ObservableObject
         set => SetProperty(ref _usePowerPointRendering, value);
     }
 
+    public bool EnableDebugLogging
+    {
+        get => _enableDebugLogging;
+        set => SetProperty(ref _enableDebugLogging, value);
+    }
+
     public void RestoreDefaults() => Load(new ApplicationSettings());
 
     public bool TryCreateSettings(out ApplicationSettings? settings, out string error)
@@ -125,7 +132,8 @@ public sealed class SettingsWindowViewModel : ObservableObject
             maxEmbeddedItemSize,
             maxPreviewImageSize,
             maxTotalPreviewImageSize,
-            UsePowerPointRendering);
+            UsePowerPointRendering,
+            EnableDebugLogging);
         if (!ApplicationSettings.TryValidate(candidate, out error))
         {
             return false;
@@ -150,6 +158,7 @@ public sealed class SettingsWindowViewModel : ObservableObject
         MaxPreviewImageSizeMb = Format(settings.MaxPreviewImageSizeMb);
         MaxTotalPreviewImageSizeMb = Format(settings.MaxTotalPreviewImageSizeMb);
         UsePowerPointRendering = settings.UsePowerPointRendering;
+        EnableDebugLogging = settings.EnableDebugLogging;
     }
 
     private static string Format(int value) => value.ToString(CultureInfo.CurrentCulture);
