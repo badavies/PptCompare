@@ -62,6 +62,15 @@
                           IsChecked="{Binding UsePowerPointRendering}"
                           Margin="0,3,0,8" />
 
+                <TextBlock Style="{StaticResource SectionHeading}" Text="Diagnostics" />
+                <CheckBox Content="Enable detailed diagnostic logging (debug mode)"
+                          IsChecked="{Binding EnableDebugLogging}"
+                          Margin="0,3,0,4" />
+                <TextBlock Text="Records PowerPoint startup stages, timings and technical error codes. Presentation names, paths, slide text and images are never written to the log. Disable this after diagnosing the problem."
+                           TextWrapping="Wrap"
+                           Foreground="#68758D"
+                           Margin="0,0,0,8" />
+
                 <TextBlock Style="{StaticResource SectionHeading}" Text="File safety limits" />
                 <Grid>
                     <Grid.ColumnDefinitions>

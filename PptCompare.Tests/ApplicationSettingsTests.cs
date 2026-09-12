@@ -15,6 +15,7 @@ public sealed class ApplicationSettingsTests
         Assert.AreEqual(250L * 1024 * 1024, limits.MaxFileBytes);
         Assert.AreEqual(2_000, limits.MaxSlides);
         Assert.AreEqual(25 * 1024 * 1024, limits.MaxPreviewImageBytes);
+        Assert.IsFalse(settings.EnableDebugLogging);
     }
 
     [TestMethod]

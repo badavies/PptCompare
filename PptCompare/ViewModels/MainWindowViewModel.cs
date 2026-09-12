@@ -25,6 +25,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly RelayCommand _settingsCommand;
     private readonly RelayCommand _aboutCommand;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly object _previewRenderGate = new();
+    private readonly HashSet<LoadedPresentation> _presentationsBeingRendered =
+        new(ReferenceEqualityComparer.Instance);
     private LoadedPresentation? _leftPresentation;
     private LoadedPresentation? _rightPresentation;
     private bool _isBusy;
@@ -190,6 +193,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
+        LoadedPresentation? previewToStart = null;
         try
         {
             var path = _filePicker.PickPresentation();
@@ -234,7 +238,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             StatusMessage = BuildLoadedStatus(loaded, fileName);
             if (_settings.UsePowerPointRendering)
             {
-                _ = RenderPresentationInBackgroundAsync(loaded);
+                previewToStart = loaded;
             }
         }
         catch (PresentationLoadException exception)
@@ -249,6 +253,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         finally
         {
             EndOperation();
+            if (previewToStart is not null)
+            {
+                QueuePreviewRendering(previewToStart);
+            }
         }
     }
 
@@ -259,6 +267,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
+        var retryMissingPreviews = false;
         try
         {
             if (_leftPresentation is null || _rightPresentation is null)
@@ -280,6 +289,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 $"changed={result.ChangedSlides};moved={result.MovedSlides};added={result.AddedSlides};removed={result.RemovedSlides}");
             StatusMessage =
                 $"Comparison complete — {result.ChangedSlides} changed, {result.MovedSlides} moved, {result.AddedSlides} added, {result.RemovedSlides} removed.";
+            retryMissingPreviews = _settings.UsePowerPointRendering;
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
@@ -288,6 +298,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         finally
         {
             EndOperation();
+            if (retryMissingPreviews)
+            {
+                StartMissingPreviewRendering();
+            }
         }
     }
 
@@ -378,6 +392,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
 
             _settingsService.Save(updatedSettings);
+            if (_diagnostics is IDetailedApplicationDiagnostics detailedDiagnostics)
+            {
+                detailedDiagnostics.SetDebugLoggingEnabled(updatedSettings.EnableDebugLogging);
+            }
+
             if (_presentationSource is IConfigurablePresentationSourceService configurableSource)
             {
                 configurableSource.UpdateLimits(updatedSettings.ToReadLimits());
@@ -424,15 +443,28 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         if (_leftPresentation is { } left && left.Slides.Any(slide => slide.RenderedImagePath is null))
         {
-            _ = RenderPresentationInBackgroundAsync(left);
+            QueuePreviewRendering(left);
         }
 
         if (_rightPresentation is { } right &&
             !ReferenceEquals(right, _leftPresentation) &&
             right.Slides.Any(slide => slide.RenderedImagePath is null))
         {
-            _ = RenderPresentationInBackgroundAsync(right);
+            QueuePreviewRendering(right);
         }
+    }
+
+    private void QueuePreviewRendering(LoadedPresentation presentation)
+    {
+        lock (_previewRenderGate)
+        {
+            if (!_presentationsBeingRendered.Add(presentation))
+            {
+                return;
+            }
+        }
+
+        _ = RenderPresentationInBackgroundAsync(presentation);
     }
 
     private string BuildLoadedStatus(LoadedPresentation loaded, string fileName)
@@ -593,6 +625,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
+            var receivedNewPreview = rendering.SlideImages.Count > 0;
             var renderedSlides = loaded.Slides
                 .Select(slide => rendering.SlideImages.TryGetValue(slide.Number, out var imagePath)
                     ? slide with { RenderedImagePath = imagePath }
@@ -620,11 +653,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 _rightPresentation = renderedPresentation;
             }
 
-            if (_isBusy)
+            if (receivedNewPreview && _isBusy)
             {
                 _comparisonRefreshPending = true;
             }
-            else if (_hasCompared)
+            else if (receivedNewPreview && _hasCompared)
             {
                 await RefreshComparisonAfterRenderingAsync();
             }
@@ -647,6 +680,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (!_disposed && !_isBusy)
             {
                 StatusMessage = "The PowerPoint preview was unavailable; the built-in preview remains ready.";
+            }
+        }
+        finally
+        {
+            lock (_previewRenderGate)
+            {
+                _presentationsBeingRendered.Remove(loaded);
             }
         }
     }
