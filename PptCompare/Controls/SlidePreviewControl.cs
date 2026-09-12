@@ -105,7 +105,7 @@ public sealed class SlidePreviewControl : FrameworkElement
                 continue;
             }
 
-            if (element.Kind == SlideElementKind.Image && element.ImageBytes is { Length: > 0 })
+            if (element is { Kind: SlideElementKind.Image, ImageBytes.Length: > 0 })
             {
                 var image = GetEmbeddedImage(element);
                 if (image is not null)
@@ -123,24 +123,27 @@ public sealed class SlidePreviewControl : FrameworkElement
                 2,
                 2);
 
-            if (!string.IsNullOrWhiteSpace(element.Text) && bounds.Width >= 20 && bounds.Height >= 12)
+            if (string.IsNullOrWhiteSpace(element.Text) ||
+                bounds is not { Width: >= 20, Height: >= 12 })
             {
-                var text = element.Text.Length > 300 ? element.Text[..300] + "…" : element.Text;
-                var formatted = new FormattedText(
-                    text,
-                    CultureInfo.CurrentUICulture,
-                    FlowDirection.LeftToRight,
-                    new Typeface("Segoe UI"),
-                    Math.Clamp(14 * scale * 12_192_000 / Math.Max(1, slide.Width), 7, 16),
-                    TextForeground,
-                    VisualTreeHelper.GetDpi(this).PixelsPerDip)
-                {
-                    MaxTextWidth = Math.Max(1, bounds.Width - 8),
-                    MaxTextHeight = Math.Max(1, bounds.Height - 8),
-                    Trimming = TextTrimming.CharacterEllipsis
-                };
-                drawingContext.DrawText(formatted, new Point(bounds.X + 4, bounds.Y + 4));
+                continue;
             }
+
+            var text = element.Text.Length > 300 ? element.Text[..300] + "…" : element.Text;
+            var formatted = new FormattedText(
+                text,
+                CultureInfo.CurrentUICulture,
+                FlowDirection.LeftToRight,
+                new Typeface("Segoe UI"),
+                Math.Clamp(14 * scale * 12_192_000 / Math.Max(1, slide.Width), 7, 16),
+                TextForeground,
+                VisualTreeHelper.GetDpi(this).PixelsPerDip)
+            {
+                MaxTextWidth = Math.Max(1, bounds.Width - 8),
+                MaxTextHeight = Math.Max(1, bounds.Height - 8),
+                Trimming = TextTrimming.CharacterEllipsis
+            };
+            drawingContext.DrawText(formatted, new Point(bounds.X + 4, bounds.Y + 4));
         }
     }
 

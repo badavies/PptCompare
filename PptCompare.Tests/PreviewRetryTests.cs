@@ -44,7 +44,7 @@ public sealed class PreviewRetryTests
         await WaitUntilAsync(() => viewModel.StatusMessage.StartsWith(
             "Comparison complete",
             StringComparison.Ordinal));
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.CancellationToken);
 
         Assert.AreEqual(4, callsAfterSuccessfulRetry);
         Assert.AreEqual(callsAfterSuccessfulRetry, renderer.CallCount);
@@ -73,11 +73,11 @@ public sealed class PreviewRetryTests
 
         viewModel.OpenPresentationCommand.Execute("Right");
         await WaitUntilAsync(() =>
-            viewModel.IsLeftPreviewRendering && viewModel.IsRightPreviewRendering);
+            viewModel is { IsLeftPreviewRendering: true, IsRightPreviewRendering: true });
 
         renderer.Complete("left.pptx");
         await WaitUntilAsync(() =>
-            !viewModel.IsLeftPreviewRendering && viewModel.IsRightPreviewRendering);
+            viewModel is { IsLeftPreviewRendering: false, IsRightPreviewRendering: true });
 
         renderer.Complete("right.pptx");
         await WaitUntilAsync(() => !viewModel.IsRightPreviewRendering);
@@ -164,12 +164,9 @@ public sealed class PreviewRetryTests
         {
             var completion = new TaskCompletionSource<SlideRenderingResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_pending.TryAdd(presentationPath, completion))
-            {
-                throw new InvalidOperationException("A render is already pending for this presentation.");
-            }
-
-            return completion.Task.WaitAsync(cancellationToken);
+            return _pending.TryAdd(presentationPath, completion)
+                ? completion.Task.WaitAsync(cancellationToken)
+                : throw new InvalidOperationException("A render is already pending for this presentation.");
         }
 
         public void Complete(string presentationPath)
@@ -230,4 +227,6 @@ public sealed class PreviewRetryTests
         {
         }
     }
+
+    public TestContext TestContext { get; set; } = null!;
 }

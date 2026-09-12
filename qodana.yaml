@@ -1,84 +1,89 @@
-#-------------------------------------------------------------------------------#
-#               Qodana analysis is configured by qodana.yaml file               #
-#             https://www.jetbrains.com/help/qodana/qodana-yaml.html            #
-#-------------------------------------------------------------------------------#
-#################################################################################
-#              WARNING: Do not store sensitive information in this file,        #
-#               as its contents will be included in the Qodana report.          #
-#################################################################################
 version: "1.0"
-#Specify IDE code to run analysis without container (Applied in CI/CD pipeline)
+
 ide: QDNET
-#Specify inspection profile for code analysis
+
+# JetBrains' broader, generally useful inspection profile.
 profile:
-  name: qodana.starter
-include:
-  - name: ConvertIfStatementToReturnStatement
-  - name: ConvertIfStatementToNullCoalescingExpression
-  - name: AutoPropertyCanBeMadeGetOnly.Global
-  - name: AsyncVoidMethod
-  - name: HeapView.BoxingAllocation
-  - name: CanReplaceCastWithLambdaReturnType
-  - name: ChangeFieldTypeToSystemThreadingLock
-  - name: HeapView.ClosureAllocation
-  - name: UseNegatedPatternMatching
-  - name: ConvertIfStatementToSwitchStatement
-  - name: ConvertToPrimaryConstructor
-  - name: ConvertToConstant.Local
-  - name: ConvertToAutoProperty
-  - name: HeapView.DelegateAllocation
-  - name: ExtractCommonBranchingCode
-  - name: InlineTemporaryVariable
-  - name: InvertIf
-  - name: LoopCanBeConvertedToQuery
-  - name: MemberCanBePrivate.Global
-  - name: MergeIntoNegatedPattern
-  - name: MergeIntoPattern
-  - name: MethodHasAsyncOverload
-  - name: InvocationIsSkipped
+  name: qodana.recommended
+
+exclude:
+  # Generated and packaged output.
+  - name: All
+    paths:
+      - PptCompare/bin
+      - PptCompare/obj
+      - PptCompare/publish
+      - PptCompare/dist
+      - PptCompare.Tests/bin
+      - PptCompare.Tests/obj
+
+  # Allocation observations are useful during dedicated performance
+  # profiling, but overwhelm normal quality reports.
   - name: HeapView.ObjectAllocation
   - name: HeapView.ObjectAllocation.Evident
   - name: HeapView.ObjectAllocation.Possible
-  - name: ForeachCanBePartlyConvertedToQueryUsingAnotherGetEnumerator
-  - name: UseNullPropagation
-  - name: ReplaceWithFieldKeyword
-  - name: MSTEST0049
-  - name: MSTEST0068
-  - name: MSTEST0046
-  - name: MSTEST0037
-  - name: SwitchStatementMissingSomeEnumCasesNoDefault
-  - name: UnusedMemberInSuper.Global
-  - name: UnusedMember.Global
-  - name: Xaml.BindingWithoutContextNotResolved
-  - name: UnusedParameter.Global
-  - name: UseCollectionExpression
-  - name: UseDeconstruction
+  - name: HeapView.DelegateAllocation
+  - name: HeapView.ClosureAllocation
+  - name: HeapView.BoxingAllocation
 
-#Enable inspections
-#include:
-#  - name: <SomeEnabledInspectionId>
-#Disable inspections
-#exclude:
-#  - name: <SomeDisabledInspectionId>
-#    paths:
-#      - <path/where/not/run/inspection>
-#Execute shell command before Qodana execution (Applied in CI/CD pipeline)
-#bootstrap: sh ./prepare-qodana.sh
-#Install IDE plugins before Qodana execution (Applied in CI/CD pipeline)
-#plugins:
-#  - id: <plugin.id> #(plugin id can be found at https://plugins.jetbrains.com)
-# Quality gate. Will fail the CI/CD pipeline if any condition is not met
-# severityThresholds - configures maximum thresholds for different problem severities
-# testCoverageThresholds - configures minimum code coverage on a whole project and newly added code
-# dependencyLicenses - fails the run on prohibited or unknown dependency licenses
-# Code Coverage is available in Ultimate and Ultimate Plus plans
-#failureConditions:
-#  severityThresholds:
-#    any: 15
-#    critical: 5
-#  testCoverageThresholds:
-#    fresh: 70
-#    total: 50
-#  dependencyLicenses:
-#    failOnProhibited: true
-#    failOnUnknown: false
+  # These DataContexts are assigned at runtime. Qodana cannot resolve
+  # their bindings statically, although WPF resolves them correctly.
+  - name: Xaml.BindingWithoutContextNotResolved
+    paths:
+      - PptCompare/MainWindow.xaml
+      - PptCompare/SettingsWindow.xaml
+
+  # Public properties are required for WPF data binding.
+  - name: MemberCanBePrivate.Global
+    paths:
+      - PptCompare/ViewModels
+      - PptCompare.Tests/HardeningTests.cs
+
+  - name: UnusedMember.Global
+    paths:
+      - PptCompare/ViewModels
+      - PptCompare.Tests/HardeningTests.cs
+
+  # These test members emulate PowerPoint's dynamic COM API.
+  - name: UnusedParameter.Global
+    paths:
+      - PptCompare.Tests/HardeningTests.cs
+
+  - name: AutoPropertyCanBeMadeGetOnly.Global
+    paths:
+      - PptCompare.Tests/HardeningTests.cs
+
+  # ICommand.Execute must return void; the implementation catches
+  # and safely handles asynchronous exceptions.
+  - name: AsyncVoidMethod
+    paths:
+      - PptCompare/Infrastructure/RelayCommand.cs
+
+  # Debug.WriteLine is intentionally omitted from Release builds.
+  - name: InvocationIsSkipped
+
+  # Conventional WPF partial-class declarations.
+  - name: RedundantExtendsListEntry
+    paths:
+      - PptCompare/App.xaml.cs
+      - PptCompare/MainWindow.xaml.cs
+      - PptCompare/SettingsWindow.xaml.cs
+      - PptCompare/AboutWindow.xaml.cs
+
+  # Interface exists for dependency injection and testing.
+  - name: UnusedMemberInSuper.Global
+    paths:
+      - PptCompare/Services/ApplicationSettingsServices.cs
+
+  # Assertion-syntax preferences rather than test defects.
+  - name: MSTEST0037
+  - name: MSTEST0046
+  - name: MSTEST0068
+
+# Reject actual errors and warnings, while allowing informational notes.
+# Remove this section if using Qodana Community for .NET, which does not
+# support severity-specific thresholds.
+failureConditions:
+  severityThresholds:
+    critical: 0
+    high: 0

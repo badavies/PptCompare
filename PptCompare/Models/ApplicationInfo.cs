@@ -18,14 +18,14 @@ public static class ApplicationInfo
         var informationalVersion = assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
             .InformationalVersion;
-        if (!string.IsNullOrWhiteSpace(informationalVersion))
+        if (string.IsNullOrWhiteSpace(informationalVersion))
         {
-            var metadataSeparator = informationalVersion.IndexOf('+', StringComparison.Ordinal);
-            return metadataSeparator >= 0
-                ? informationalVersion[..metadataSeparator]
-                : informationalVersion;
+            return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
         }
 
-        return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        var metadataSeparator = informationalVersion.IndexOf('+', StringComparison.Ordinal);
+        return metadataSeparator >= 0
+            ? informationalVersion[..metadataSeparator]
+            : informationalVersion;
     }
 }

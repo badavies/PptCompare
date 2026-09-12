@@ -131,7 +131,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
             }
             catch (TimeoutException)
             {
-                renderCancellation.Cancel();
+                await renderCancellation.CancelAsync();
                 Debug.WriteLine(
                     $"PowerPoint rendering timed out after {RenderTimeout.TotalSeconds:N0} seconds.");
                 _diagnostics.RecordEvent("PreviewRenderTimedOut");
@@ -915,23 +915,18 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
     }
 
-    private sealed class PowerPointRenderTrace
+    private sealed class PowerPointRenderTrace(IApplicationDiagnostics diagnostics)
     {
-        private readonly IDetailedApplicationDiagnostics? _diagnostics;
+        private readonly IDetailedApplicationDiagnostics? _diagnostics =
+            diagnostics as IDetailedApplicationDiagnostics;
         private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
         private readonly string _renderId = Guid.NewGuid().ToString("N")[..8];
-
-        public PowerPointRenderTrace(IApplicationDiagnostics diagnostics)
-        {
-            _diagnostics = diagnostics as IDetailedApplicationDiagnostics;
-        }
 
         public bool IsEnabled => _diagnostics is { IsDebugLoggingEnabled: true };
 
         public void Record(string stage, string? nonSensitiveDetail = null)
         {
-            var diagnostics = _diagnostics;
-            if (diagnostics is not { IsDebugLoggingEnabled: true })
+            if (_diagnostics is not { IsDebugLoggingEnabled: true } diagnostics)
             {
                 return;
             }
@@ -969,7 +964,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         lock (_renderFolderGate)
         {
             _disposed = true;
-            foldersToDelete = _renderFolders.ToList();
+            foldersToDelete = [.. _renderFolders];
             _renderFolders.Clear();
         }
 

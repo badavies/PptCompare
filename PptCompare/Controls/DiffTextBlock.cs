@@ -356,27 +356,27 @@ public sealed class DiffTextBlock : RichTextBox
     {
         foreach (var block in blocks)
         {
-            if (block is SlideTextParagraphBlock paragraphBlock)
+            switch (block)
             {
-                yield return paragraphBlock.Paragraph;
-                continue;
-            }
+                case SlideTextParagraphBlock paragraphBlock:
+                    yield return paragraphBlock.Paragraph;
+                    break;
+                case SlideTextTableBlock table:
+                    foreach (var paragraph in table.Rows
+                                 .SelectMany(row => row.Cells)
+                                 .SelectMany(cell => cell.Paragraphs))
+                    {
+                        yield return paragraph;
+                    }
 
-            if (block is SlideTextTableBlock table)
-            {
-                foreach (var paragraph in table.Rows
-                             .SelectMany(row => row.Cells)
-                             .SelectMany(cell => cell.Paragraphs))
-                {
-                    yield return paragraph;
-                }
+                    break;
             }
         }
     }
 
     private static SolidColorBrush? TryCreateColorBrush(string? value)
     {
-        if (value is not { Length: 7 } || value[0] != '#' ||
+        if (value is not ['#', _, _, _, _, _, _] ||
             !byte.TryParse(value.AsSpan(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var red) ||
             !byte.TryParse(value.AsSpan(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var green) ||
             !byte.TryParse(value.AsSpan(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var blue))

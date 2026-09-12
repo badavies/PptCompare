@@ -18,7 +18,7 @@ public sealed class ComparisonServiceTests
             CreateSlide(1, "Final structure", "No content changes"),
             CreateSlide(2, "Current structure", "No content changes"));
 
-        var result = await _service.CompareAsync(left, right);
+        var result = await _service.CompareAsync(left, right, TestContext.CancellationToken);
 
         Assert.AreEqual(0, result.ChangedSlides);
         Assert.AreEqual(2, result.MovedSlides);
@@ -33,14 +33,17 @@ public sealed class ComparisonServiceTests
         var left = CreatePresentation(CreateSlide(1, "Summary", "Forecast is £42m", leftImage));
         var right = CreatePresentation(CreateSlide(1, "Summary", "Forecast is £44m", rightImage));
 
-        var result = await _service.CompareAsync(left, right);
+        var result = await _service.CompareAsync(left, right, TestContext.CancellationToken);
 
         var slide = result.Slides.Single();
         Assert.AreEqual(1, result.ChangedSlides);
         Assert.IsTrue(slide.RightBodySegments?.Any(segment => segment.Kind == DiffKind.Added));
         Assert.IsTrue(slide.ElementChanges.Any(change =>
-            change.ElementKind == SlideElementKind.Image &&
-            change.Kind == SlideElementChangeKind.Replaced));
+            change is
+            {
+                ElementKind: SlideElementKind.Image,
+                Kind: SlideElementChangeKind.Replaced
+            }));
         Assert.AreEqual("Forecast is £42m", left.Slides[0].Paragraphs[1]);
     }
 
@@ -72,4 +75,6 @@ public sealed class ComparisonServiceTests
             contentHash,
             contentHash,
             string.Empty);
+
+    public TestContext TestContext { get; set; } = null!;
 }

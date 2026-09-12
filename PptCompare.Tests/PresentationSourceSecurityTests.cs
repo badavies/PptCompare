@@ -13,11 +13,11 @@ public sealed class PresentationSourceSecurityTests
         var path = CreateTestPath("not-a-presentation.txt");
         try
         {
-            await File.WriteAllTextAsync(path, "plain text");
+            await File.WriteAllTextAsync(path, "plain text", TestContext.CancellationToken);
             var source = new OpenXmlPresentationSourceService();
 
             await Assert.ThrowsExactlyAsync<PresentationLoadException>(() =>
-                source.LoadAsync(new PresentationReference(path, "not-a-presentation.txt")));
+                source.LoadAsync(new PresentationReference(path, "not-a-presentation.txt"), TestContext.CancellationToken));
         }
         finally
         {
@@ -31,11 +31,11 @@ public sealed class PresentationSourceSecurityTests
         var path = CreateTestPath("corrupt.pptx");
         try
         {
-            await File.WriteAllTextAsync(path, "not an Open XML package");
+            await File.WriteAllTextAsync(path, "not an Open XML package", TestContext.CancellationToken);
             var source = new OpenXmlPresentationSourceService();
 
             await Assert.ThrowsExactlyAsync<PresentationLoadException>(() =>
-                source.LoadAsync(new PresentationReference(path, "corrupt.pptx")));
+                source.LoadAsync(new PresentationReference(path, "corrupt.pptx"), TestContext.CancellationToken));
         }
         finally
         {
@@ -49,4 +49,6 @@ public sealed class PresentationSourceSecurityTests
         Directory.CreateDirectory(folder);
         return Path.Combine(folder, $"{Guid.NewGuid():N}-{fileName}");
     }
+
+    public TestContext TestContext { get; set; } = null!;
 }

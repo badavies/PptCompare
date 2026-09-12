@@ -8,13 +8,8 @@ using PptCompare.Models;
 
 namespace PptCompare.Services;
 
-public sealed class SettingsPersistenceException : Exception
-{
-    public SettingsPersistenceException(string message, Exception innerException)
-        : base(message, innerException)
-    {
-    }
-}
+public sealed class SettingsPersistenceException(string message, Exception innerException)
+    : Exception(message, innerException);
 
 public interface IApplicationSettingsService
 {
@@ -76,14 +71,14 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
                 16 * 1024,
                 FileOptions.SequentialScan);
             var settings = JsonSerializer.Deserialize<ApplicationSettings>(stream, SerializerOptions);
-            if (!ApplicationSettings.TryValidate(settings, out var validationError))
+            if (ApplicationSettings.TryValidate(settings, out var validationError))
             {
-                Debug.WriteLine($"PptCompare settings were ignored: {validationError}");
-                _diagnostics.RecordEvent("SettingsReset", "reason=invalid-values");
-                return new ApplicationSettings();
+                return settings!;
             }
 
-            return settings!;
+            Debug.WriteLine($"PptCompare settings were ignored: {validationError}");
+            _diagnostics.RecordEvent("SettingsReset", "reason=invalid-values");
+            return new ApplicationSettings();
         }
         catch (Exception exception) when (IsExpectedPersistenceException(exception))
         {
