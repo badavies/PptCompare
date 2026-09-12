@@ -2,9 +2,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
-using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security;
 using System.Text;
 using PptCompare.Models;
 
@@ -35,7 +33,7 @@ public sealed class FileApplicationDiagnostics : IApplicationDiagnostics, IDetai
     private const long MaxLogBytes = 1024 * 1024;
     private const int MaxArchivedLogs = 4;
     private const int MaxTokenLength = 160;
-    private readonly object _writeGate = new();
+    private readonly Lock _writeGate = new();
     private readonly string _logDirectory;
     private readonly string _logPath;
     private int _debugLoggingEnabled;

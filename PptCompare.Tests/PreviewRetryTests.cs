@@ -51,6 +51,38 @@ public sealed class PreviewRetryTests
         CollectionAssert.AreEqual(ExpectedRenderedPaths, renderer.RenderedPaths.ToArray());
     }
 
+    [TestMethod]
+    public async Task LoadingIndicatorsTrackEachPreviewIndependently()
+    {
+        var renderer = new PendingRenderer();
+        var filePicker = new QueueFilePicker("left.pptx", "right.pptx");
+        using var viewModel = new MainWindowViewModel(
+            filePicker,
+            new StubPresentationSource(),
+            new TextPresentationComparisonService(),
+            renderer,
+            new RecordingDiagnostics(),
+            new StubSettingsService(),
+            new StubSettingsDialogService(),
+            new StubAboutDialogService(),
+            new ApplicationSettings(UsePowerPointRendering: true));
+
+        viewModel.OpenPresentationCommand.Execute("Left");
+        await WaitUntilAsync(() => viewModel.IsLeftPreviewRendering);
+        Assert.IsFalse(viewModel.IsRightPreviewRendering);
+
+        viewModel.OpenPresentationCommand.Execute("Right");
+        await WaitUntilAsync(() =>
+            viewModel.IsLeftPreviewRendering && viewModel.IsRightPreviewRendering);
+
+        renderer.Complete("left.pptx");
+        await WaitUntilAsync(() =>
+            !viewModel.IsLeftPreviewRendering && viewModel.IsRightPreviewRendering);
+
+        renderer.Complete("right.pptx");
+        await WaitUntilAsync(() => !viewModel.IsRightPreviewRendering);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var timeout = Stopwatch.StartNew();
@@ -117,6 +149,49 @@ public sealed class PreviewRetryTests
 
         public void Dispose()
         {
+        }
+    }
+
+    private sealed class PendingRenderer : IPresentationRenderer
+    {
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<SlideRenderingResult>> _pending =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        public Task<SlideRenderingResult> RenderAsync(
+            string presentationPath,
+            int slideCount,
+            CancellationToken cancellationToken = default)
+        {
+            var completion = new TaskCompletionSource<SlideRenderingResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_pending.TryAdd(presentationPath, completion))
+            {
+                throw new InvalidOperationException("A render is already pending for this presentation.");
+            }
+
+            return completion.Task.WaitAsync(cancellationToken);
+        }
+
+        public void Complete(string presentationPath)
+        {
+            if (!_pending.TryRemove(presentationPath, out var completion))
+            {
+                throw new InvalidOperationException("No render is pending for this presentation.");
+            }
+
+            completion.SetResult(new SlideRenderingResult(
+                new Dictionary<int, string> { [1] = $"{presentationPath}.png" },
+                "Rendered."));
+        }
+
+        public void Dispose()
+        {
+            foreach (var completion in _pending.Values)
+            {
+                completion.TrySetCanceled();
+            }
+
+            _pending.Clear();
         }
     }
 

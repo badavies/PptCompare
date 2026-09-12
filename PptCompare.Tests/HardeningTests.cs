@@ -344,7 +344,7 @@ public sealed class HardeningTests
     private sealed class RecordingDetailedDiagnostics
         : IApplicationDiagnostics, IDetailedApplicationDiagnostics
     {
-        private readonly object _gate = new();
+        private readonly Lock _gate = new();
         private readonly List<string> _debugEvents = [];
 
         public string DisplayLogLocation => string.Empty;

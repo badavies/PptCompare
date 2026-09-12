@@ -25,12 +25,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly RelayCommand _settingsCommand;
     private readonly RelayCommand _aboutCommand;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
-    private readonly object _previewRenderGate = new();
+    private readonly Lock _previewRenderGate = new();
     private readonly HashSet<LoadedPresentation> _presentationsBeingRendered =
         new(ReferenceEqualityComparer.Instance);
     private LoadedPresentation? _leftPresentation;
     private LoadedPresentation? _rightPresentation;
     private bool _isBusy;
+    private bool _isLeftPreviewRendering;
+    private bool _isRightPreviewRendering;
     private bool _disposed;
     private bool _hasCompared;
     private bool _comparisonRefreshPending;
@@ -180,6 +182,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _outputTextFontSize, value);
     }
 
+    public bool IsLeftPreviewRendering
+    {
+        get => _isLeftPreviewRendering;
+        private set => SetProperty(ref _isLeftPreviewRendering, value);
+    }
+
+    public bool IsRightPreviewRendering
+    {
+        get => _isRightPreviewRendering;
+        private set => SetProperty(ref _isRightPreviewRendering, value);
+    }
+
     public ICommand OpenPresentationCommand => _openPresentationCommand;
     public ICommand CompareCommand => _compareCommand;
     public ICommand SwapSidesCommand => _swapSidesCommand;
@@ -235,7 +249,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             _hasCompared = false;
             _comparisonRefreshPending = false;
-            StatusMessage = BuildLoadedStatus(loaded, fileName);
+            StatusMessage = BuildLoadedStatus(loaded);
             if (_settings.UsePowerPointRendering)
             {
                 previewToStart = loaded;
@@ -323,6 +337,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var previousRightVersions = RightVersions.ToList();
 
             (_leftPresentation, _rightPresentation) = (_rightPresentation, _leftPresentation);
+            UpdatePreviewRenderingState();
 
             SelectedLeftVersion = null;
             SelectedRightVersion = null;
@@ -464,10 +479,27 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
         }
 
+        UpdatePreviewRenderingState();
         _ = RenderPresentationInBackgroundAsync(presentation);
     }
 
-    private string BuildLoadedStatus(LoadedPresentation loaded, string fileName)
+    private void UpdatePreviewRenderingState()
+    {
+        bool isLeftRendering;
+        bool isRightRendering;
+        lock (_previewRenderGate)
+        {
+            isLeftRendering = _leftPresentation is not null &&
+                              _presentationsBeingRendered.Contains(_leftPresentation);
+            isRightRendering = _rightPresentation is not null &&
+                               _presentationsBeingRendered.Contains(_rightPresentation);
+        }
+
+        IsLeftPreviewRendering = isLeftRendering;
+        IsRightPreviewRendering = isRightRendering;
+    }
+
+    private string BuildLoadedStatus(LoadedPresentation loaded)
     {
         var nextAction = _leftPresentation is not null && _rightPresentation is not null
             ? "Ready to compare."
@@ -475,7 +507,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var previewStatus = _settings.UsePowerPointRendering
             ? " Preparing the PowerPoint preview in the background."
             : " The built-in preview is ready.";
-        return $"Loaded {loaded.Slides.Count} slides from {fileName}. {nextAction}{previewStatus}";
+        return $"Loaded {loaded.Slides.Count} slides from {loaded.Source.DisplayName}. {nextAction}{previewStatus}";
     }
 
     private static double PointsToDeviceIndependentPixels(double points) => points * 96d / 72d;
@@ -633,8 +665,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 .ToList();
             var renderedPresentation = loaded with
             {
-                Slides = renderedSlides,
-                RenderingStatus = rendering.Status
+                Slides = renderedSlides
             };
 
             var isLeft = ReferenceEquals(_leftPresentation, loaded);
@@ -687,6 +718,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             lock (_previewRenderGate)
             {
                 _presentationsBeingRendered.Remove(loaded);
+            }
+
+            if (!_disposed)
+            {
+                UpdatePreviewRenderingState();
             }
         }
     }
@@ -765,7 +801,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _lifetimeCancellation.Dispose();
         _renderer.Dispose();
 
-        GC.SuppressFinalize(this);
     }
 
 }

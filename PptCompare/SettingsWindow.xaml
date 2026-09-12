@@ -83,25 +83,25 @@
                         <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Style="{StaticResource SettingLabel}" Text="Maximum presentation size (MB)" />
+                    <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum presentation size (MB)" />
                     <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding MaxFileSizeMb}" />
-                    <TextBlock Grid.Row="1" Style="{StaticResource SettingLabel}" Text="Maximum slides" />
+                    <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum slides" />
                     <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MaxSlides}" />
-                    <TextBlock Grid.Row="2" Style="{StaticResource SettingLabel}" Text="Maximum elements per slide" />
+                    <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum elements per slide" />
                     <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MaxElementsPerSlide}" />
-                    <TextBlock Grid.Row="3" Style="{StaticResource SettingLabel}" Text="Maximum table cells per slide" />
+                    <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum table cells per slide" />
                     <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding MaxTableCellsPerSlide}" />
-                    <TextBlock Grid.Row="4" Style="{StaticResource SettingLabel}" Text="Maximum text paragraphs per slide" />
+                    <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum text paragraphs per slide" />
                     <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding MaxParagraphsPerSlide}" />
-                    <TextBlock Grid.Row="5" Style="{StaticResource SettingLabel}" Text="Maximum characters per slide" />
+                    <TextBlock Grid.Row="5" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum characters per slide" />
                     <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding MaxCharactersPerSlide}" />
-                    <TextBlock Grid.Row="6" Style="{StaticResource SettingLabel}" Text="Maximum characters per presentation" />
+                    <TextBlock Grid.Row="6" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum characters per presentation" />
                     <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding MaxTotalCharacters}" />
-                    <TextBlock Grid.Row="7" Style="{StaticResource SettingLabel}" Text="Maximum embedded item size (MB)" />
+                    <TextBlock Grid.Row="7" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum embedded item size (MB)" />
                     <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding MaxEmbeddedItemSizeMb}" />
-                    <TextBlock Grid.Row="8" Style="{StaticResource SettingLabel}" Text="Maximum preview image size (MB)" />
+                    <TextBlock Grid.Row="8" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum preview image size (MB)" />
                     <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding MaxPreviewImageSizeMb}" />
-                    <TextBlock Grid.Row="9" Style="{StaticResource SettingLabel}" Text="Maximum total preview images (MB)" />
+                    <TextBlock Grid.Row="9" Grid.Column="0" Style="{StaticResource SettingLabel}" Text="Maximum total preview images (MB)" />
                     <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding MaxTotalPreviewImageSizeMb}" />
                 </Grid>
                 <TextBlock Text="Values are validated against built-in safety ceilings. New limits apply the next time a presentation is opened." TextWrapping="Wrap" Foreground="#68758D" Margin="0,8,0,0" />
