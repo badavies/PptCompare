@@ -5,7 +5,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Security;
 using Microsoft.Win32;
-using PptCompare.Models;
 
 namespace PptCompare.Services;
 
@@ -17,7 +16,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     private const long MaxRenderedPresentationBytes = 500L * 1024 * 1024;
     private static readonly TimeSpan RenderTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan StaleRenderFolderAge = TimeSpan.FromHours(24);
-    private readonly object _renderFolderGate = new();
+    private readonly Lock _renderFolderGate = new();
     private readonly SemaphoreSlim _renderSemaphore = new(1, 1);
     private readonly Queue<string> _renderFolders = new();
     private readonly IPowerPointApplicationFactory _applicationFactory;
@@ -28,11 +27,6 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     private readonly TimeProvider _timeProvider;
     private readonly PowerPointWarmStartOptions _warmStartOptions;
     private bool _disposed;
-
-    public PowerPointPresentationRenderer()
-        : this(NullApplicationDiagnostics.Instance)
-    {
-    }
 
     public PowerPointPresentationRenderer(IApplicationDiagnostics diagnostics)
         : this(
@@ -113,6 +107,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
 
             using var renderCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken);
+            var renderCancellationToken = renderCancellation.Token;
             var completion = new TaskCompletionSource<SlideRenderingResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var thread = new Thread(() =>
@@ -122,7 +117,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                     powerPointWasAlreadyRunning,
                     trace,
                     completion,
-                    renderCancellation.Token))
+                    renderCancellationToken))
             {
                 IsBackground = true,
                 Name = "PptCompare PowerPoint renderer"
@@ -983,7 +978,6 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
             DeleteRenderFolder(folder);
         }
 
-        GC.SuppressFinalize(this);
     }
 }
 

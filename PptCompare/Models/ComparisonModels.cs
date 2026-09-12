@@ -31,7 +31,6 @@ public sealed record SlideTextStyle(
     bool? StrikeThrough = null,
     SlideTextBaseline Baseline = SlideTextBaseline.Normal,
     string? Color = null,
-    double? FontSizePoints = null,
     string? FontFamily = null);
 
 public sealed record SlideTextRun(string Text, SlideTextStyle Style);
@@ -58,8 +57,7 @@ public sealed record SlideTextTableBlock(
 
 public sealed record LoadedPresentation(
     PresentationReference Source,
-    IReadOnlyList<PresentationSlide> Slides,
-    string RenderingStatus = "Using the built-in slide preview.");
+    IReadOnlyList<PresentationSlide> Slides);
 
 public enum SlideElementKind
 {

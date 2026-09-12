@@ -47,13 +47,13 @@
                             <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
-                        <TextBlock Text="Software designer" FontWeight="SemiBold" Margin="0,3" />
-                        <TextBlock Grid.Column="1" Text="Ben Davies" Margin="0,3" />
-                        <TextBlock Grid.Row="1" Text="Version" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Software designer" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="Ben Davies" Margin="0,3" />
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Version" FontWeight="SemiBold" Margin="0,3" />
                         <TextBlock x:Name="DetailVersionText" Grid.Row="1" Grid.Column="1" Margin="0,3" />
-                        <TextBlock Grid.Row="2" Text="Platform" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Platform" FontWeight="SemiBold" Margin="0,3" />
                         <TextBlock x:Name="PlatformText" Grid.Row="2" Grid.Column="1" Margin="0,3" />
-                        <TextBlock Grid.Row="3" Text="Supported files" FontWeight="SemiBold" Margin="0,3" />
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Supported files" FontWeight="SemiBold" Margin="0,3" />
                         <TextBlock Grid.Row="3" Grid.Column="1" Text=".pptx and .pptm" Margin="0,3" />
                     </Grid>
                 </Border>

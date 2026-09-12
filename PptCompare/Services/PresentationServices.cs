@@ -90,7 +90,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         "http://schemas.openxmlformats.org/drawingml/2006/main";
     private static readonly XNamespace RelationshipNamespace =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-    private readonly object _limitsGate = new();
+    private readonly Lock _limitsGate = new();
     private PresentationReadLimits _limits;
 
     public OpenXmlPresentationSourceService(PresentationReadLimits? limits = null)
@@ -372,7 +372,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         var titleCandidate = candidates.FirstOrDefault(candidate => candidate.IsTitle) ?? candidates[0];
         var title = titleCandidate.Paragraphs[0];
         var blocks = candidates
-            .OrderBy(candidate => candidate.HasBounds ? 0 : 1)
+            .OrderBy(candidate => candidate.HasResolvedBounds ? 0 : 1)
             .ThenBy(candidate => candidate.Bounds.Y)
             .ThenBy(candidate => candidate.Bounds.X)
             .ThenBy(candidate => candidate.DocumentOrder)
@@ -591,7 +591,6 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         bool? strikeThrough = null;
         var baseline = SlideTextBaseline.Normal;
         string? color = null;
-        double? fontSize = null;
         string? fontFamily = null;
 
         foreach (var layer in layers.Where(layer => layer is not null))
@@ -624,15 +623,6 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                 };
             }
 
-            if (int.TryParse(
-                    layer.Attribute("sz")?.Value,
-                    NumberStyles.Integer,
-                    CultureInfo.InvariantCulture,
-                    out var sizeValue) && sizeValue is >= 100 and <= 40_000)
-            {
-                fontSize = sizeValue / 100d;
-            }
-
             var typeface = layer.Element(DrawingNamespace + "latin")?.Attribute("typeface")?.Value;
             if (!string.IsNullOrWhiteSpace(typeface) && !typeface.StartsWith('+'))
             {
@@ -649,7 +639,6 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             strikeThrough,
             baseline,
             color,
-            fontSize,
             fontFamily);
     }
 
@@ -1057,7 +1046,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         bool IsTitle,
         IReadOnlyList<SlideTextBlock> Blocks)
     {
-        public bool HasBounds => Bounds.Width > 0 || Bounds.Height > 0;
+        public bool HasResolvedBounds => Bounds.Width > 0 || Bounds.Height > 0;
         public List<SlideTextParagraph> Paragraphs =>
             EnumerateParagraphs(Blocks).ToList();
     }
@@ -1783,7 +1772,6 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
 
     private static string[] Tokenize(string text) =>
         DiffTokenRegex().Matches(text)
-            .Cast<Match>()
             .Select(match => match.Value)
             .ToArray();
 

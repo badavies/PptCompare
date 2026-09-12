@@ -9,7 +9,6 @@ public static class ApplicationInfo
     public const string ProductName = "PptCompare";
     public const string Designer = "Ben Davies";
     public const string Copyright = "© 2026 Ben Davies";
-    public const string Description = "Local presentation version comparison for Windows.";
 
     public static string Version => ResolvedVersion.Value;
 

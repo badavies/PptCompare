@@ -332,6 +332,9 @@ public sealed class DiffTextBlock : RichTextBox
 
                 AddDecoration(run, TextDecorations.Strikethrough[0]);
                 break;
+            case DiffKind.Unchanged:
+            default:
+                break;
         }
     }
 
