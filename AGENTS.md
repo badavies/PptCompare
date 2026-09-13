@@ -130,11 +130,11 @@ The established visual identity uses `#2c4697` for the application/header blue, 
 Run commands from the solution directory:
 
 ```powershell
-dotnet restore Solution1.sln --locked-mode
-dotnet build Solution1.sln --configuration Release --no-restore
-dotnet test Solution1.sln --configuration Release --no-build --no-restore
-dotnet format Solution1.sln whitespace --no-restore --verify-no-changes
-dotnet format Solution1.sln analyzers --no-restore --verify-no-changes --severity warn
+dotnet restore PptCompare.sln --locked-mode
+dotnet build PptCompare.sln --configuration Release --no-restore
+dotnet test PptCompare.sln --configuration Release --no-build --no-restore
+dotnet format PptCompare.sln whitespace --no-restore --verify-no-changes
+dotnet format PptCompare.sln analyzers --no-restore --verify-no-changes --severity warn
 ```
 
 Before handing over a change, at minimum complete a Release build and all tests. Add regression tests when changing slide matching, text order, formatting, comparison direction, cancellation, settings validation or PowerPoint lifecycle behaviour.

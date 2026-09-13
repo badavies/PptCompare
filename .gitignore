@@ -1,5 +1,46 @@
-bin/
-obj/
-/packages/
-riderModule.iml
-/_ReSharper.Caches/
+# .NET build and publication output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+[Pp]ublish/
+[Dd]ist/
+
+# Test and analysis output
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+*.binlog
+*.sarif
+
+# Rider, Visual Studio and local editor state
+.idea/
+.vs/
+.vscode/
+_ReSharper.Caches/
+*.sln.iml
+*.sln.DotSettings.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Local and temporary files
+[Ll]ogs/
+*.log
+*.tmp
+~$*
+Thumbs.db
+.DS_Store
+
+# Secrets and signing material
+.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key
+*.publishsettings
+*.pubxml.user
