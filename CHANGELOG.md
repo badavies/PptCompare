@@ -6,15 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-13
+
 ### Added
 
 - Repository README, security policy and MIT licence.
 - Native Arm64 publication guidance.
+- Comprehensive boundary, malformed-file, resource-budget, image-decoding and PowerPoint-timeout regression tests.
 
 ### Changed
 
 - Renamed the solution from `Solution1.sln` to `PptCompare.sln`.
 - Expanded source-control exclusions for generated output, IDE state, diagnostics and signing material.
+- Declared and locked both `win-x64` and `win-arm64` publication targets.
+- Bounded cumulative Open XML related-part processing and reused cached part hashes.
+- Reworked element matching to remain globally bounded and cancellable, use the true closest candidate while the work budget permits, and avoid arbitrary matches after exhaustion.
+- Hardened preview image validation with a PNG/JPEG allow-list, source-dimension limits and a cumulative retained decoded-pixel budget.
+- Prevented a timed-out PowerPoint COM worker from overlapping a later render request.
+- Strengthened presentation document-type and structural validation.
 
 ## 0.1.0 - 2026-09-12
 

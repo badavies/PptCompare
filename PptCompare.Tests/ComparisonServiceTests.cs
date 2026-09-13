@@ -47,6 +47,66 @@ public sealed class ComparisonServiceTests
         Assert.AreEqual("Forecast is £42m", left.Slides[0].Paragraphs[1]);
     }
 
+    [TestMethod]
+    public async Task ReorderedLargeCandidateGroupUsesTheTrueClosestElements()
+    {
+        const int elementCount = 300;
+        var leftElements = Enumerable.Range(0, elementCount)
+            .Select(index => CreateRepeatedElement($"left-{index}", index))
+            .ToArray();
+        var rightElements = Enumerable.Range(0, elementCount)
+            .Reverse()
+            .Select(index => CreateRepeatedElement($"right-{index}", index))
+            .ToArray();
+        var left = CreatePresentation(CreateSlide(1, "Summary", "Body", leftElements));
+        var right = CreatePresentation(CreateSlide(1, "Summary", "Body", rightElements));
+
+        var result = await _service.CompareAsync(left, right, TestContext.CancellationToken);
+
+        var slide = result.Slides.Single();
+        Assert.AreEqual("Unchanged", slide.ChangeKind);
+        Assert.IsEmpty(slide.ElementChanges);
+    }
+
+    [TestMethod]
+    public async Task CancellationDuringElementCandidateSearchIsObserved()
+    {
+        const int elementCount = 300;
+        var leftElements = Enumerable.Range(0, elementCount)
+            .Select(index => CreateRepeatedElement($"left-{index}", index))
+            .ToArray();
+        var rightBacking = Enumerable.Range(0, elementCount)
+            .Reverse()
+            .Select(index => CreateRepeatedElement($"right-{index}", index))
+            .ToArray();
+        using var cancellation = new CancellationTokenSource();
+        var rightElements = new CancelOnIndexerReadList<SlideElement>(
+            rightBacking,
+            elementCount + 10,
+            cancellation.Cancel);
+        var left = CreatePresentation(CreateSlide(1, "Summary", "Body", leftElements));
+        var rightSlide = new PresentationSlide(
+            1,
+            "Summary",
+            ["Summary", "Body"],
+            12_192_000,
+            6_858_000,
+            rightElements);
+        var right = CreatePresentation(rightSlide);
+
+        try
+        {
+            await _service.CompareAsync(left, right, cancellation.Token);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            Assert.IsGreaterThanOrEqualTo(elementCount + 10, rightElements.IndexerReads);
+            return;
+        }
+
+        Assert.Fail("Cancellation raised during element matching should stop the comparison.");
+    }
+
     private static LoadedPresentation CreatePresentation(params PresentationSlide[] slides) =>
         new(new PresentationReference("test.pptx", "Test"), slides);
 
@@ -75,6 +135,47 @@ public sealed class ComparisonServiceTests
             contentHash,
             contentHash,
             string.Empty);
+
+    private static SlideElement CreateRepeatedElement(string id, int position) =>
+        new(
+            id,
+            "Repeated image",
+            SlideElementKind.Image,
+            new SlideBounds(position * 10_000L, 100, 500, 500),
+            "shared-content",
+            "shared-visual",
+            string.Empty);
+
+    private sealed class CancelOnIndexerReadList<T>(
+        IReadOnlyList<T> items,
+        int cancelOnRead,
+        Action cancel) : IReadOnlyList<T>
+    {
+        private int _indexerReads;
+
+        public T this[int index]
+        {
+            get
+            {
+                var readCount = Interlocked.Increment(ref _indexerReads);
+                if (readCount == cancelOnRead)
+                {
+                    cancel();
+                }
+
+                return items[index];
+            }
+        }
+
+        public int Count => items.Count;
+
+        public int IndexerReads => Volatile.Read(ref _indexerReads);
+
+        public IEnumerator<T> GetEnumerator() => items.GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
+    }
 
     public TestContext TestContext { get; set; } = null!;
 }

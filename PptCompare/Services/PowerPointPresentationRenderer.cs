@@ -14,7 +14,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     private const int MaxCachedPresentations = 8;
     private const long MaxRenderedImageBytes = 50L * 1024 * 1024;
     private const long MaxRenderedPresentationBytes = 500L * 1024 * 1024;
-    private static readonly TimeSpan RenderTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan DefaultRenderTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan StaleRenderFolderAge = TimeSpan.FromHours(24);
     private readonly Lock _renderFolderGate = new();
     private readonly SemaphoreSlim _renderSemaphore = new(1, 1);
@@ -24,6 +24,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     private readonly IPowerPointProcessLauncher _powerPointProcessLauncher;
     private readonly IPowerPointProcessDetector _powerPointProcessDetector;
     private readonly string _renderRoot;
+    private readonly TimeSpan _renderTimeout;
     private readonly TimeProvider _timeProvider;
     private readonly PowerPointWarmStartOptions _warmStartOptions;
     private bool _disposed;
@@ -47,7 +48,8 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         IPowerPointProcessDetector? powerPointProcessDetector = null,
         IPowerPointApplicationFactory? applicationFactory = null,
         IPowerPointProcessLauncher? powerPointProcessLauncher = null,
-        PowerPointWarmStartOptions? warmStartOptions = null)
+        PowerPointWarmStartOptions? warmStartOptions = null,
+        TimeSpan? renderTimeout = null)
     {
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         ArgumentException.ThrowIfNullOrWhiteSpace(renderRoot);
@@ -58,6 +60,14 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         _powerPointProcessLauncher = powerPointProcessLauncher ?? new RegisteredPowerPointProcessLauncher();
         _warmStartOptions = warmStartOptions ?? PowerPointWarmStartOptions.Default;
         _warmStartOptions.Validate();
+        _renderTimeout = renderTimeout ?? DefaultRenderTimeout;
+        if (_renderTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(renderTimeout),
+                "The PowerPoint render timeout must be greater than zero.");
+        }
+
         CleanupStaleRenderFolders();
     }
 
@@ -71,6 +81,8 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(slideCount);
 
         await _renderSemaphore.WaitAsync(cancellationToken);
+        CancellationTokenSource? renderCancellation = null;
+        var renderLeaseTransferred = false;
         try
         {
             var trace = new PowerPointRenderTrace(_diagnostics);
@@ -105,18 +117,21 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 "process-check-completed",
                 $"alreadyRunning={powerPointWasAlreadyRunning.ToString(CultureInfo.InvariantCulture)}");
 
-            using var renderCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            renderCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken);
             var renderCancellationToken = renderCancellation.Token;
             var completion = new TaskCompletionSource<SlideRenderingResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            var workerExited = new TaskCompletionSource<object?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             var thread = new Thread(() =>
-                RenderOnStaThread(
+                RunRenderWorker(
                     presentationPath,
                     slideCount,
                     powerPointWasAlreadyRunning,
                     trace,
                     completion,
+                    workerExited,
                     renderCancellationToken))
             {
                 IsBackground = true,
@@ -127,23 +142,158 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
 
             try
             {
-                return await completion.Task.WaitAsync(RenderTimeout, cancellationToken);
+                var result = await completion.Task.WaitAsync(
+                    _renderTimeout,
+                    cancellationToken);
+                await workerExited.Task;
+                thread.Join();
+                return result;
             }
             catch (TimeoutException)
             {
-                await renderCancellation.CancelAsync();
+                await RequestWorkerCancellationAsync(renderCancellation);
+                renderLeaseTransferred = true;
+                _ = ObserveWorkerAndReleaseRenderLeaseAsync(
+                    thread,
+                    workerExited.Task,
+                    completion.Task,
+                    renderCancellation);
                 Debug.WriteLine(
-                    $"PowerPoint rendering timed out after {RenderTimeout.TotalSeconds:N0} seconds.");
+                    $"PowerPoint rendering timed out after {_renderTimeout.TotalSeconds:N0} seconds.");
                 _diagnostics.RecordEvent("PreviewRenderTimedOut");
                 trace.Record("timed-out");
                 return new SlideRenderingResult(
                     new Dictionary<int, string>(),
                     "PowerPoint rendering timed out; using the built-in slide preview.");
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await RequestWorkerCancellationAsync(renderCancellation);
+                renderLeaseTransferred = true;
+                _ = ObserveWorkerAndReleaseRenderLeaseAsync(
+                    thread,
+                    workerExited.Task,
+                    completion.Task,
+                    renderCancellation);
+                throw;
+            }
         }
         finally
         {
+            if (!renderLeaseTransferred)
+            {
+                renderCancellation?.Dispose();
+                _renderSemaphore.Release();
+            }
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "The STA thread boundary must convert unexpected automation failures into the safe built-in-preview fallback.")]
+    private void RunRenderWorker(
+        string presentationPath,
+        int expectedSlideCount,
+        bool powerPointWasAlreadyRunning,
+        PowerPointRenderTrace trace,
+        TaskCompletionSource<SlideRenderingResult> completion,
+        TaskCompletionSource<object?> workerExited,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            RenderOnStaThread(
+                presentationPath,
+                expectedSlideCount,
+                powerPointWasAlreadyRunning,
+                trace,
+                completion,
+                cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"The PowerPoint rendering worker failed unexpectedly: {exception}");
+            completion.TrySetResult(new SlideRenderingResult(
+                new Dictionary<int, string>(),
+                "PowerPoint rendering was unavailable; using the built-in slide preview."));
+            RecordExceptionWithoutThrowing("PreviewRenderWorkerFailed", exception);
+        }
+        finally
+        {
+            workerExited.TrySetResult(null);
+        }
+    }
+
+    private async Task RequestWorkerCancellationAsync(
+        CancellationTokenSource renderCancellation)
+    {
+        try
+        {
+            await renderCancellation.CancelAsync();
+        }
+        catch (AggregateException exception)
+        {
+            RecordExceptionWithoutThrowing("PreviewRenderCancellationFailed", exception);
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "A deferred worker result must always be observed so its semaphore lease and cancellation registrations can be released safely.")]
+    private async Task ObserveWorkerAndReleaseRenderLeaseAsync(
+        Thread thread,
+        Task workerExited,
+        Task<SlideRenderingResult> completion,
+        CancellationTokenSource renderCancellation)
+    {
+        try
+        {
+            await workerExited.ConfigureAwait(false);
+            try
+            {
+                await completion.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation is the expected completion after an outer timeout or caller cancellation.
+            }
+            catch (Exception exception)
+            {
+                RecordExceptionWithoutThrowing("PreviewRenderDeferredWorkerFailed", exception);
+            }
+
+            try
+            {
+                thread.Join();
+            }
+            catch (ThreadStateException exception)
+            {
+                RecordExceptionWithoutThrowing("PreviewRenderWorkerJoinFailed", exception);
+            }
+        }
+        finally
+        {
+            renderCancellation.Dispose();
             _renderSemaphore.Release();
+        }
+    }
+
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "Diagnostic logging must never prevent deferred automation cleanup from releasing its serialization lease.")]
+    private void RecordExceptionWithoutThrowing(string eventName, Exception exception)
+    {
+        try
+        {
+            _diagnostics.RecordException(eventName, exception);
+        }
+        catch (Exception diagnosticsException)
+        {
+            Debug.WriteLine(
+                $"PowerPoint diagnostics could not record {eventName}: {diagnosticsException}");
         }
     }
 

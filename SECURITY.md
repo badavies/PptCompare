@@ -6,8 +6,8 @@ PptCompare processes presentation files and optionally automates Microsoft Power
 
 | Version | Security updates |
 | --- | --- |
-| 0.1.x | Supported during the workplace pilot |
-| Earlier versions | Not supported |
+| 0.2.x | Supported during the workplace pilot |
+| 0.1.x and earlier | Not supported |
 
 Only the latest published build in a supported release line should be deployed. Self-contained releases bundle their own .NET runtime and must be rebuilt and redeployed to receive runtime security updates.
 
@@ -35,11 +35,14 @@ PptCompare is designed to:
 
 - Process presentations locally without telemetry or application-managed uploads.
 - Treat presentations and settings files as untrusted input and enforce bounded resource limits.
+- Validate the Open XML document type against its extension and bound relationship references, unique related parts and cumulative decompressed related content.
+- Validate PNG/JPEG headers and source dimensions before image decoding, then cap retained decoded pixels per slide preview.
 - Open presentation packages read-only and avoid saving to source files.
 - Disable macros when PowerPoint opens staged temporary copies for preview rendering.
 - Avoid logging presentation content, filenames, paths or document metadata.
 - Keep debug logging opt-in and subject to the same privacy rules as normal logging.
 - Never terminate or close a pre-existing or uncertain PowerPoint session.
+- Keep PowerPoint automation serialized until a timed-out or cancelled STA worker has actually exited.
 - Degrade to the built-in preview when optional PowerPoint rendering fails.
 
 These measures reduce risk but do not replace endpoint protection, supported Microsoft Office versions, signed releases, least-privilege deployment or normal organisational security controls.

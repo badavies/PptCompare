@@ -4,7 +4,7 @@ PptCompare is a Windows desktop application for comparing two versions of a Micr
 
 The application is intended for local workplace use. Presentation content is processed on the computer and is not uploaded by PptCompare.
 
-> **Project status:** PptCompare 0.1.x is an early workplace-pilot release. Validate it against representative presentations and your organisation's deployment policies before a wider rollout.
+> **Project status:** PptCompare 0.2.x is a security-hardened workplace-pilot release. Validate it against representative presentations and your organisation's deployment policies before a wider rollout.
 
 ## Features
 
@@ -93,6 +93,7 @@ High-fidelity preview images are generated from staged temporary copies and clea
 - WPF requires Windows.
 - High-fidelity rendering depends on a locally installed and activated copy of desktop PowerPoint.
 - The built-in preview is intentionally less visually exact than PowerPoint's renderer.
+- For decoder hardening, direct embedded-image display in the built-in preview is limited to validated PNG and JPEG data; other image formats remain comparable by content hash and are visible in the optional PowerPoint-rendered preview.
 - SharePoint version history and Microsoft Graph authentication are planned but not yet implemented.
 
 ## Contributing

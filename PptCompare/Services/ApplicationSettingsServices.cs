@@ -34,16 +34,19 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
     private readonly IApplicationDiagnostics _diagnostics;
 
     public JsonApplicationSettingsService(IApplicationDiagnostics? diagnostics = null)
+        : this(GetDefaultSettingsPath(), diagnostics)
     {
-        _diagnostics = diagnostics ?? NullApplicationDiagnostics.Instance;
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(localAppData))
-        {
-            throw new InvalidOperationException("The per-user application data folder is unavailable.");
-        }
+    }
 
-        _settingsDirectory = Path.Combine(localAppData, "PptCompare");
-        _settingsPath = Path.Combine(_settingsDirectory, "settings.json");
+    internal JsonApplicationSettingsService(
+        string settingsPath,
+        IApplicationDiagnostics? diagnostics = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(settingsPath);
+        _diagnostics = diagnostics ?? NullApplicationDiagnostics.Instance;
+        _settingsPath = Path.GetFullPath(settingsPath);
+        _settingsDirectory = Path.GetDirectoryName(_settingsPath)
+            ?? throw new ArgumentException("The settings path must include a directory.", nameof(settingsPath));
     }
 
     public ApplicationSettings Load()
@@ -139,6 +142,17 @@ public sealed class JsonApplicationSettingsService : IApplicationSettingsService
     private static bool IsExpectedPersistenceException(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or JsonException or NotSupportedException or
             SecurityException or ArgumentException;
+
+    private static string GetDefaultSettingsPath()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData))
+        {
+            throw new InvalidOperationException("The per-user application data folder is unavailable.");
+        }
+
+        return Path.Combine(localAppData, "PptCompare", "settings.json");
+    }
 
     private static void TryDeleteTemporaryFile(string path, IApplicationDiagnostics diagnostics)
     {

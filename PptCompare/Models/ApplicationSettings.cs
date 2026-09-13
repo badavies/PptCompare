@@ -10,6 +10,9 @@ public sealed record PresentationReadLimits(
     int MaxCharactersPerSlide = 500_000,
     long MaxTotalCharacters = 20_000_000,
     long MaxRelatedPartBytes = 100L * 1024 * 1024,
+    int MaxRelationshipReferences = 100_000,
+    int MaxUniqueRelatedParts = 10_000,
+    long MaxTotalRelatedPartBytes = 500L * 1024 * 1024,
     int MaxPreviewImageBytes = 25 * 1024 * 1024,
     long MaxTotalPreviewImageBytes = 100L * 1024 * 1024);
 

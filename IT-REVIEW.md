@@ -1,6 +1,6 @@
 # PptCompare – Technical and IT Review Summary
 
-**Application version:** 0.1.0  
+**Application version:** 0.2.0
 **Software designer:** Ben Davies  
 **Copyright:** © 2026 Ben Davies  
 **Licence:** MIT Licence  
@@ -154,10 +154,16 @@ The application applies configurable, bounded limits to reduce excessive memory,
 - Maximum presentation size: 250 MB.
 - Maximum slide count: 2,000.
 - Maximum embedded-item size: 100 MB.
+- Maximum embedded-content relationship references: 100,000.
+- Maximum unique related parts: 10,000.
+- Maximum cumulative decompressed related content: 500 MB.
 - Maximum preview image size: 25 MB per image.
 - Maximum combined preview-image size: 100 MB.
+- Maximum retained decoded image pixels: 20 million per displayed slide preview.
 
 Additional limits apply to slide elements, table cells, paragraphs and extracted characters.
+
+Before WPF decodes embedded image data, PptCompare allow-lists PNG/JPEG signatures and validates source dimensions, pixel count and aspect ratio. Unsupported embedded formats remain part of content-hash comparison but are represented by a placeholder in the built-in preview; PowerPoint-rendered previews can still display them.
 
 Presentations are:
 
@@ -198,6 +204,8 @@ It must never:
 - Save or alter the original presentation.
 
 PowerPoint automation is serialized on a dedicated STA thread. PptCompare opens only a staged, read-only copy and attempts to close only that copy.
+
+If a render times out or is cancelled, its serialization lease is retained until the STA worker actually exits. A later request therefore cannot overlap the still-running COM operation.
 
 PowerPoint is asked to exit only when PptCompare has strong evidence that:
 
@@ -257,11 +265,14 @@ The repository currently includes:
   - Slide matching and reordering.
   - Text and image comparison.
   - Cancellation.
-  - Presentation input validation.
-  - Application settings validation.
+  - Presentation extension, document type, package structure and input validation.
+  - Per-item and cumulative presentation resource budgets.
+  - Application settings boundaries, incorrect input types and strict JSON persistence.
+  - Raster signature, dimension, pixel and aggregate decode limits.
   - Diagnostic-log privacy.
   - Temporary-file cleanup.
   - PowerPoint ownership and shutdown safety.
+  - PowerPoint timeout serialization and queued-render cancellation.
   - Preview retry behaviour.
 
 The repository does not currently contain a committed automated CI/CD workflow. Before wider deployment, it would be advisable to run build, test, static analysis and dependency checks automatically for every pull request and release.

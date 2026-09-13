@@ -1,8 +1,21 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace PptCompare.Models;
 
 public sealed record PresentationReference(string Location, string DisplayName);
 
-public sealed record VersionDescriptor(string Id, string DisplayName, DateTimeOffset? ModifiedAt = null);
+public sealed record VersionDescriptor(
+    [property: SuppressMessage(
+        "ReSharper",
+        "NotAccessedPositionalProperty.Global",
+        Justification = "Reserved for stable SharePoint and Microsoft Graph version identifiers.")]
+    string Id,
+    string DisplayName,
+    [property: SuppressMessage(
+        "ReSharper",
+        "NotAccessedPositionalProperty.Global",
+        Justification = "Reserved for SharePoint and Microsoft Graph version-history metadata.")]
+    DateTimeOffset? ModifiedAt = null);
 
 public sealed record PresentationSlide(
     int Number,

@@ -181,6 +181,84 @@ public sealed class HardeningTests
     }
 
     [TestMethod]
+    public async Task TimedOutWorkerRetainsRenderLeaseUntilItsStaThreadExits()
+    {
+        var testRoot = CreateTestDirectory();
+        var presentationPath = Path.Combine(testRoot, "source.pptx");
+        await File.WriteAllBytesAsync(
+            presentationPath,
+            [1, 2, 3, 4],
+            TestContext.CancellationToken);
+        var application = new FakePowerPointApplication(userPresentationCount: 1);
+        using var applicationFactory = new BlockingFirstPowerPointApplicationFactory(application);
+        try
+        {
+            using var renderer = new PowerPointPresentationRenderer(
+                new RecordingDiagnostics(),
+                Path.Combine(testRoot, "renders"),
+                TimeProvider.System,
+                new StubPowerPointProcessDetector(isRunning: true),
+                applicationFactory,
+                new StubPowerPointProcessLauncher(),
+                FastWarmStartOptions,
+                TimeSpan.FromMilliseconds(250));
+
+            var timedOutRender = renderer.RenderAsync(
+                presentationPath,
+                1,
+                TestContext.CancellationToken);
+            await applicationFactory.FirstActivationStarted.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.CancellationToken);
+
+            var timedOutResult = await timedOutRender.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.CancellationToken);
+
+            StringAssert.Contains(timedOutResult.Status, "timed out");
+            Assert.AreEqual(1, applicationFactory.CreateCount);
+
+            using var queuedCancellation = new CancellationTokenSource();
+            var queuedRender = renderer.RenderAsync(
+                presentationPath,
+                1,
+                queuedCancellation.Token);
+
+            Assert.IsFalse(queuedRender.IsCompleted);
+            Assert.AreEqual(1, applicationFactory.CreateCount);
+            await queuedCancellation.CancelAsync();
+            try
+            {
+                await queuedRender;
+                Assert.Fail("A render cancelled while waiting for the active worker should not run.");
+            }
+            catch (OperationCanceledException) when (queuedCancellation.IsCancellationRequested)
+            {
+                // Expected: callers can cancel while the timed-out worker retains the lease.
+            }
+
+            Assert.AreEqual(1, applicationFactory.CreateCount);
+            applicationFactory.ReleaseFirstActivation();
+
+            var subsequentResult = await renderer.RenderAsync(
+                    presentationPath,
+                    1,
+                    TestContext.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(2), TestContext.CancellationToken);
+
+            Assert.AreEqual(2, applicationFactory.CreateCount);
+            Assert.AreEqual(1, applicationFactory.MaximumConcurrentActivations);
+            Assert.AreEqual(1, subsequentResult.SlideImages.Count);
+        }
+        finally
+        {
+            applicationFactory.ReleaseFirstActivation();
+            await applicationFactory.FirstActivationReturned.WaitAsync(TimeSpan.FromSeconds(2));
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
     public async Task ColdStartFailureDebugTraceIdentifiesActivationStageWithoutSourceDetails()
     {
         const int serverExecutionFailed = unchecked((int)0x80080005);
@@ -235,7 +313,7 @@ public sealed class HardeningTests
             var summary = diagnostics.CreateSupportSummary();
 
             StringAssert.Contains(summary, "Product: PptCompare");
-            StringAssert.Contains(summary, "Version: 0.1.0");
+            StringAssert.Contains(summary, "Version: 0.2.0");
             StringAssert.Contains(summary, "presentation content are not recorded");
             Assert.IsFalse(summary.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase));
             Assert.IsFalse(summary.Contains(testRoot, StringComparison.OrdinalIgnoreCase));
@@ -339,6 +417,77 @@ public sealed class HardeningTests
         public bool IsPowerPointInstalled() => true;
 
         public object CreateApplication() => throw exception;
+    }
+
+    private sealed class BlockingFirstPowerPointApplicationFactory(
+        FakePowerPointApplication application) : IPowerPointApplicationFactory, IDisposable
+    {
+        private readonly ManualResetEventSlim _releaseFirstActivation = new(initialState: false);
+        private readonly TaskCompletionSource<object?> _firstActivationReturned = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<object?> _firstActivationStarted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _activeActivations;
+        private int _createCount;
+        private int _maximumConcurrentActivations;
+
+        public int CreateCount => Volatile.Read(ref _createCount);
+
+        public Task FirstActivationReturned => _firstActivationReturned.Task;
+
+        public Task FirstActivationStarted => _firstActivationStarted.Task;
+
+        public int MaximumConcurrentActivations =>
+            Volatile.Read(ref _maximumConcurrentActivations);
+
+        public bool IsPowerPointInstalled() => true;
+
+        public object CreateApplication()
+        {
+            var activationNumber = Interlocked.Increment(ref _createCount);
+            var activeActivations = Interlocked.Increment(ref _activeActivations);
+            SetMaximumConcurrentActivations(activeActivations);
+            try
+            {
+                if (activationNumber == 1)
+                {
+                    _firstActivationStarted.TrySetResult(null);
+                    _releaseFirstActivation.Wait();
+                }
+
+                return application;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeActivations);
+                if (activationNumber == 1)
+                {
+                    _firstActivationReturned.TrySetResult(null);
+                }
+            }
+        }
+
+        public void ReleaseFirstActivation() => _releaseFirstActivation.Set();
+
+        public void Dispose() => _releaseFirstActivation.Dispose();
+
+        private void SetMaximumConcurrentActivations(int candidate)
+        {
+            var current = Volatile.Read(ref _maximumConcurrentActivations);
+            while (candidate > current)
+            {
+                var observed = Interlocked.CompareExchange(
+                    ref _maximumConcurrentActivations,
+                    candidate,
+                    current);
+                if (observed == current)
+                {
+                    return;
+                }
+
+                current = observed;
+            }
+        }
     }
 
     private sealed class RecordingDetailedDiagnostics

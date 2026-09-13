@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Globalization;
 using System.IO;
 using System.Windows;
@@ -10,6 +11,7 @@ namespace PptCompare.Controls;
 public sealed class SlidePreviewControl : FrameworkElement
 {
     private const long MaxRenderedImageBytes = 50L * 1024 * 1024;
+    private const int MaxImageHeaderProbeBytes = 128 * 1024;
     private static readonly Brush SlideBackground = CreateBrush(255, 255, 255);
     private static readonly Brush PlaceholderFill = CreateBrush(241, 245, 249);
     private static readonly Brush PlaceholderStroke = CreateBrush(148, 163, 184);
@@ -19,6 +21,7 @@ public sealed class SlidePreviewControl : FrameworkElement
     private static readonly Brush RemovedBrush = CreateBrush(194, 65, 59);
     private static readonly Brush ModifiedBrush = CreateBrush(202, 124, 22);
     private readonly Dictionary<string, ImageSource?> _embeddedImages = new(StringComparer.Ordinal);
+    private long _embeddedDecodedPixels;
     private string? _loadedRenderedPath;
     private ImageSource? _renderedImage;
 
@@ -210,10 +213,15 @@ public sealed class SlidePreviewControl : FrameworkElement
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read | FileShare.Delete);
-            _renderedImage = LoadBitmap(stream);
+            if (!HasSafeImageHeader(stream, out var header))
+            {
+                return null;
+            }
+
+            _renderedImage = LoadBitmap(stream, header);
         }
         catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or NotSupportedException)
+            IsExpectedImageLoadFailure(exception))
         {
             _renderedImage = null;
         }
@@ -228,14 +236,38 @@ public sealed class SlidePreviewControl : FrameworkElement
             return cached;
         }
 
+        var imageBytes = element.ImageBytes;
+        if (imageBytes is null ||
+            !RasterImageHeaderValidator.TryValidate(imageBytes, out var header))
+        {
+            _embeddedImages[element.ContentHash] = null;
+            return null;
+        }
+
+        var expectedDecodedPixels = RasterImageHeaderValidator.CalculateDecodedPixelCount(header);
+        if (!RasterImageHeaderValidator.CanRetainDecodedPixels(
+                _embeddedDecodedPixels,
+                expectedDecodedPixels))
+        {
+            _embeddedImages[element.ContentHash] = null;
+            return null;
+        }
+
         ImageSource? image = null;
         try
         {
-            using var stream = new MemoryStream(element.ImageBytes!, false);
-            image = LoadBitmap(stream);
+            using var stream = new MemoryStream(imageBytes, false);
+            var bitmap = LoadBitmap(stream, header);
+            var actualDecodedPixels = (long)bitmap.PixelWidth * bitmap.PixelHeight;
+            if (RasterImageHeaderValidator.TryReserveDecodedPixels(
+                    ref _embeddedDecodedPixels,
+                    actualDecodedPixels))
+            {
+                image = bitmap;
+            }
         }
         catch (Exception exception) when (
-            exception is IOException or NotSupportedException)
+            IsExpectedImageLoadFailure(exception))
         {
         }
 
@@ -243,13 +275,80 @@ public sealed class SlidePreviewControl : FrameworkElement
         return image;
     }
 
-    private static BitmapImage LoadBitmap(Stream stream)
+    private static bool HasSafeImageHeader(
+        Stream stream,
+        out RasterImageHeader header)
+    {
+        header = default;
+        var initialPosition = stream.Position;
+        try
+        {
+            Span<byte> shortHeader = stackalloc byte[24];
+            var shortHeaderLength = stream.ReadAtLeast(
+                shortHeader,
+                shortHeader.Length,
+                throwOnEndOfStream: false);
+            if (RasterImageHeaderValidator.TryValidate(
+                shortHeader[..shortHeaderLength],
+                out header))
+            {
+                return true;
+            }
+
+            if (shortHeaderLength < 2 ||
+                shortHeader[0] != 0xFF ||
+                shortHeader[1] != 0xD8)
+            {
+                return false;
+            }
+
+            stream.Position = initialPosition;
+            var bytesToRead = checked((int)Math.Min(
+                MaxImageHeaderProbeBytes,
+                Math.Max(0, stream.Length - initialPosition)));
+            if (bytesToRead == 0)
+            {
+                return false;
+            }
+
+            var headerBytes = new byte[bytesToRead];
+            var bytesRead = stream.ReadAtLeast(
+                headerBytes,
+                bytesToRead,
+                throwOnEndOfStream: false);
+            return RasterImageHeaderValidator.TryValidate(
+                headerBytes.AsSpan(0, bytesRead),
+                out header);
+        }
+        finally
+        {
+            stream.Position = initialPosition;
+        }
+    }
+
+    private static bool IsExpectedImageLoadFailure(Exception exception) =>
+        exception is ArgumentException or FormatException or IOException or
+            InvalidOperationException or NotSupportedException or UnauthorizedAccessException;
+
+    private static BitmapImage LoadBitmap(Stream stream, RasterImageHeader header)
     {
         var image = new BitmapImage();
         image.BeginInit();
         image.CacheOption = BitmapCacheOption.OnLoad;
         image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-        image.DecodePixelWidth = 1600;
+        if (header.PixelWidth >= header.PixelHeight)
+        {
+            image.DecodePixelWidth = Math.Min(
+                RasterImageHeaderValidator.MaxDecodeDimension,
+                header.PixelWidth);
+        }
+        else
+        {
+            image.DecodePixelHeight = Math.Min(
+                RasterImageHeaderValidator.MaxDecodeDimension,
+                header.PixelHeight);
+        }
+
         image.StreamSource = stream;
         image.EndInit();
         image.Freeze();
@@ -290,6 +389,7 @@ public sealed class SlidePreviewControl : FrameworkElement
         control._loadedRenderedPath = null;
         control._renderedImage = null;
         control._embeddedImages.Clear();
+        control._embeddedDecodedPixels = 0;
     }
 
     private static SolidColorBrush CreateBrush(byte red, byte green, byte blue)
@@ -297,5 +397,219 @@ public sealed class SlidePreviewControl : FrameworkElement
         var brush = new SolidColorBrush(Color.FromRgb(red, green, blue));
         brush.Freeze();
         return brush;
+    }
+}
+
+internal enum RasterImageFormat
+{
+    Png,
+    Jpeg
+}
+
+internal readonly record struct RasterImageHeader(
+    RasterImageFormat Format,
+    int PixelWidth,
+    int PixelHeight);
+
+internal static class RasterImageHeaderValidator
+{
+    internal const int MaxSourceDimension = 32_768;
+    private const long MaxSourcePixelCount = 40_000_000;
+    internal const int MaxAspectRatio = 1_000;
+    internal const int MaxDecodeDimension = 1_600;
+    private const long MaxRetainedDecodedPixels = 20_000_000;
+
+    private const int PngHeaderLength = 24;
+
+    internal static bool TryValidate(
+        ReadOnlySpan<byte> bytes,
+        out RasterImageHeader header)
+    {
+        header = default;
+
+        if (TryReadPngDimensions(bytes, out var width, out var height))
+        {
+            return TryCreateHeader(RasterImageFormat.Png, width, height, out header);
+        }
+
+        if (TryReadJpegDimensions(bytes, out width, out height))
+        {
+            return TryCreateHeader(RasterImageFormat.Jpeg, width, height, out header);
+        }
+
+        return false;
+    }
+
+    internal static long CalculateDecodedPixelCount(RasterImageHeader header)
+    {
+        var longestSide = Math.Max(header.PixelWidth, header.PixelHeight);
+        var shortestSide = Math.Min(header.PixelWidth, header.PixelHeight);
+        if (longestSide <= MaxDecodeDimension)
+        {
+            return (long)longestSide * shortestSide;
+        }
+
+        var decodedShortestSide = Math.Max(
+            1,
+            (((long)shortestSide * MaxDecodeDimension) + longestSide - 1) / longestSide);
+        return MaxDecodeDimension * decodedShortestSide;
+    }
+
+    internal static bool CanRetainDecodedPixels(long retainedPixels, long candidatePixels) =>
+        retainedPixels is >= 0 and <= MaxRetainedDecodedPixels &&
+        candidatePixels > 0 &&
+        candidatePixels <= MaxRetainedDecodedPixels - retainedPixels;
+
+    internal static bool TryReserveDecodedPixels(
+        ref long retainedPixels,
+        long candidatePixels)
+    {
+        if (!CanRetainDecodedPixels(retainedPixels, candidatePixels))
+        {
+            return false;
+        }
+
+        retainedPixels += candidatePixels;
+        return true;
+    }
+
+    private static bool TryReadPngDimensions(
+        ReadOnlySpan<byte> bytes,
+        out uint width,
+        out uint height)
+    {
+        width = 0;
+        height = 0;
+        if (bytes.Length < PngHeaderLength ||
+            bytes[0] != 0x89 ||
+            bytes[1] != 0x50 ||
+            bytes[2] != 0x4E ||
+            bytes[3] != 0x47 ||
+            bytes[4] != 0x0D ||
+            bytes[5] != 0x0A ||
+            bytes[6] != 0x1A ||
+            bytes[7] != 0x0A ||
+            BinaryPrimitives.ReadUInt32BigEndian(bytes[8..12]) != 13 ||
+            bytes[12] != 0x49 ||
+            bytes[13] != 0x48 ||
+            bytes[14] != 0x44 ||
+            bytes[15] != 0x52)
+        {
+            return false;
+        }
+
+        width = BinaryPrimitives.ReadUInt32BigEndian(bytes[16..20]);
+        height = BinaryPrimitives.ReadUInt32BigEndian(bytes[20..24]);
+        return true;
+    }
+
+    private static bool TryReadJpegDimensions(
+        ReadOnlySpan<byte> bytes,
+        out uint width,
+        out uint height)
+    {
+        width = 0;
+        height = 0;
+        if (bytes.Length < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8)
+        {
+            return false;
+        }
+
+        var position = 2;
+        while (position < bytes.Length)
+        {
+            if (bytes[position++] != 0xFF)
+            {
+                return false;
+            }
+
+            while (position < bytes.Length && bytes[position] == 0xFF)
+            {
+                position++;
+            }
+
+            if (position >= bytes.Length)
+            {
+                return false;
+            }
+
+            var marker = bytes[position++];
+            if (marker == 0x00 || marker is 0xD8 or 0xD9 or 0xDA)
+            {
+                return false;
+            }
+
+            if (marker == 0x01 || marker is >= 0xD0 and <= 0xD7)
+            {
+                continue;
+            }
+
+            if (bytes.Length - position < 2)
+            {
+                return false;
+            }
+
+            var segmentLength = BinaryPrimitives.ReadUInt16BigEndian(bytes[position..]);
+            if (segmentLength < 2 || segmentLength > bytes.Length - position)
+            {
+                return false;
+            }
+
+            if (IsStartOfFrameMarker(marker))
+            {
+                if (segmentLength < 8)
+                {
+                    return false;
+                }
+
+                var componentCount = bytes[position + 7];
+                if (componentCount == 0 || segmentLength < 8 + (3 * componentCount))
+                {
+                    return false;
+                }
+
+                height = BinaryPrimitives.ReadUInt16BigEndian(bytes[(position + 3)..]);
+                width = BinaryPrimitives.ReadUInt16BigEndian(bytes[(position + 5)..]);
+                return true;
+            }
+
+            position += segmentLength;
+        }
+
+        return false;
+    }
+
+    private static bool IsStartOfFrameMarker(byte marker) =>
+        marker is 0xC0 or 0xC1 or 0xC2 or 0xC3 or
+            0xC5 or 0xC6 or 0xC7 or
+            0xC9 or 0xCA or 0xCB or
+            0xCD or 0xCE or 0xCF;
+
+    private static bool TryCreateHeader(
+        RasterImageFormat format,
+        uint width,
+        uint height,
+        out RasterImageHeader header)
+    {
+        header = default;
+        if (width == 0 ||
+            height == 0 ||
+            width > MaxSourceDimension ||
+            height > MaxSourceDimension)
+        {
+            return false;
+        }
+
+        var pixelCount = (long)width * height;
+        var smallerDimension = Math.Min(width, height);
+        var largerDimension = Math.Max(width, height);
+        if (pixelCount > MaxSourcePixelCount ||
+            largerDimension > (long)smallerDimension * MaxAspectRatio)
+        {
+            return false;
+        }
+
+        header = new RasterImageHeader(format, checked((int)width), checked((int)height));
+        return true;
     }
 }

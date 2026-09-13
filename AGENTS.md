@@ -25,7 +25,7 @@ Microsoft Graph and SharePoint retrieval are not implemented yet. The current ve
 - Late-bound PowerPoint COM automation for optional high-fidelity PNG previews. The application does not depend on Office interop assemblies at compile time.
 - MSTest for automated tests.
 - Qodana plus built-in .NET analyzers. Warnings are treated as errors by the projects.
-- Self-contained, single-file `win-x64` publishing for portable deployment.
+- Self-contained, single-file `win-x64` and `win-arm64` publishing for portable deployment.
 
 The assembly version, author, product and copyright metadata in `PptCompare/PptCompare.csproj` are the source of truth. The software designer is Ben Davies and the copyright is © 2026 Ben Davies.
 
@@ -58,8 +58,9 @@ The assembly version, author, product and copyright metadata in `PptCompare/PptC
 - `ComparisonServiceTests.cs`: slide movement and text/image comparison behaviour.
 - `PreviewRetryTests.cs`: background preview retry and independent loading indicators.
 - `HardeningTests.cs`: diagnostics privacy, temporary-folder cleanup and PowerPoint ownership/shutdown safety.
-- `PresentationSourceSecurityTests.cs`: invalid extension and malformed Open XML rejection.
-- `ApplicationSettingsTests.cs`: safe defaults, validation and ownership metadata.
+- `PresentationSourceSecurityTests.cs`: file/type/structure rejection, cumulative Open XML budgets and cancellation.
+- `ApplicationSettingsTests.cs`: every editable boundary, incorrect input types, strict JSON persistence and ownership metadata.
+- `RasterImageHeaderValidatorTests.cs`: image signature, dimension, pixel, aspect-ratio and aggregate decode-budget validation.
 
 `PptCompare/Properties/AssemblyInfo.cs` exposes internal renderer seams to the test project. PowerPoint automation tests use fakes and must not require a live PowerPoint installation.
 
@@ -90,6 +91,7 @@ These are non-negotiable because violating them can destroy unsaved user work.
 - Quit PowerPoint only when it was not running before PptCompare started it, PptCompare's staged presentation closed successfully, and the presentation collection is confirmed empty.
 - Release every COM object explicitly and keep COM work on the dedicated STA thread.
 - Serialize render requests with the existing semaphore; parallel PowerPoint COM automation is intentionally avoided.
+- A timed-out or caller-cancelled render must retain that semaphore lease and its linked cancellation source until the STA worker has exited and been joined.
 - Preserve cancellation, the two-minute outer timeout, activation retry and warm-start logic.
 - A rendering failure is non-fatal. Return an empty image set and retain the built-in preview.
 - Preserve bulk export with per-slide export fallback.
@@ -101,6 +103,8 @@ High-fidelity rendering may attach to an existing PowerPoint automation session 
 
 - Treat every presentation and settings file as untrusted input.
 - Preserve all file, slide, element, table, paragraph, character, embedded-part and preview-image limits unless a reviewed requirement deliberately changes them.
+- Cache related parts by package URI and enforce presentation-wide relationship-reference, unique-part and decompressed-byte budgets so aliases cannot multiply processing work.
+- Validate raster signatures and dimensions before WPF decoding. Preserve the per-image source limits and the aggregate retained decoded-pixel budget for each slide preview.
 - Open presentation packages read-only and do not save changes back to them.
 - Do not log presentation content, filenames, full paths, usernames, document metadata or exception messages that might contain those values.
 - Diagnostics should contain sanitized event names, exception types, HRESULT values and non-sensitive state only.
