@@ -28,6 +28,9 @@ public sealed record PresentationSlide(
 {
     public SlideTextParagraph? TitleContent { get; init; }
     public IReadOnlyList<SlideTextBlock> TextContent { get; init; } = [];
+    // Index within Paragraphs.Skip(1) when the semantic title is deliberately repeated
+    // so TextContent can retain its actual spatial position.
+    public int? RepeatedTitleParagraphIndex { get; init; }
 }
 
 public enum SlideTextBaseline

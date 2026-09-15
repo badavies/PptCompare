@@ -4,14 +4,14 @@ PptCompare is a Windows desktop application for comparing two versions of a Micr
 
 The application is intended for local workplace use. Presentation content is processed on the computer and is not uploaded by PptCompare.
 
-> **Project status:** PptCompare 0.2.x is a security-hardened workplace-pilot release. Validate it against representative presentations and your organisation's deployment policies before a wider rollout.
+> **Project status:** PptCompare 0.3.x is a security-hardened workplace-pilot release. Validate it against representative presentations and your organisation's deployment policies before a wider rollout.
 
 ## Features
 
 - Independent left and right presentation selection.
 - Slide matching that recognises added, removed, changed and reordered slides.
 - Selectable text output with source font, colour and character styling at a configurable display size.
-- Table-aware text output that preserves rows and columns.
+- Table-aware text output that preserves rows, columns and merged cells.
 - Image, shape, layout and visual-change detection.
 - Immediate Open XML-based preview.
 - Optional high-fidelity preview rendering through desktop Microsoft PowerPoint.
@@ -76,7 +76,7 @@ PptCompare stores per-user data under `%LocalAppData%\PptCompare`:
 - `settings.json` contains validated application settings.
 - `Logs` contains bounded, rotating diagnostics.
 
-High-fidelity preview images are generated from staged temporary copies and cleaned up automatically. PptCompare must never close a pre-existing PowerPoint session or alter an original presentation.
+High-fidelity preview images are generated from isolated staged temporary copies and cleaned up automatically. PptCompare must never close a pre-existing PowerPoint session or alter an original presentation.
 
 ## Repository structure
 

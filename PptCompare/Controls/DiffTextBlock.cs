@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
+using System.Windows.Threading;
 using PptCompare.Models;
 
 namespace PptCompare.Controls;
@@ -15,6 +16,7 @@ public sealed class DiffTextBlock : RichTextBox
     private static readonly Brush RemovedForeground = CreateBrush(0xA7, 0x2D, 0x2D);
     private static readonly Brush TableBorder = CreateBrush(0xCB, 0xD5, 0xE1);
     private static readonly Thickness NoThickness = new(0);
+    private bool _documentRebuildPending;
 
     public static readonly DependencyProperty PlainTextProperty = DependencyProperty.Register(
         nameof(PlainText),
@@ -73,12 +75,27 @@ public sealed class DiffTextBlock : RichTextBox
         base.OnPropertyChanged(e);
         if (e.Property == FontSizeProperty)
         {
-            RebuildDocument();
+            ScheduleDocumentRebuild();
         }
     }
 
     private static void OnContentChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args) =>
-        ((DiffTextBlock)sender).RebuildDocument();
+        ((DiffTextBlock)sender).ScheduleDocumentRebuild();
+
+    private void ScheduleDocumentRebuild()
+    {
+        if (_documentRebuildPending)
+        {
+            return;
+        }
+
+        _documentRebuildPending = true;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Render, () =>
+        {
+            _documentRebuildPending = false;
+            RebuildDocument();
+        });
+    }
 
     private void RebuildDocument()
     {

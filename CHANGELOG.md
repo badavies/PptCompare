@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-15
+
+### Added
+
+- Regression coverage for external hyperlinks, horizontally and vertically merged table cells, repeated-title metrics, large word diffs, PowerPoint export numbering, temporary-source cleanup and per-user PowerPoint registration.
+- A presentation-wide XML-part budget that counts each unique slide, layout, master and theme once before materialisation.
+
+### Changed
+
+- Replaced repeated Open XML `OuterXml` serialization and reparsing with direct typed-root conversion, while caching shared layouts, masters and themes for each load.
+- Coalesced related selectable-text property changes into one WPF document rebuild.
+- Preserved merged table structure and continuation text without rendering duplicate placeholder cells.
+- Reduced word-diff memory pressure with rolling rows, bounded tokenization and compact chunked reconstruction data.
+- Counted a spatially repeated title only once in change summaries while retaining it in the visible slide text.
+- Required exact PowerPoint bulk-export slide numbering before accepting preview images.
+- Isolated staged source presentations from the preview cache and hardened cleanup for read-only files, late workers and reparse-point paths.
+- Added per-user PowerPoint registration discovery before machine-wide fallback.
+
+### Security
+
+- Bounded aggregate decompressed XML processing across presentation parts.
+- Prevented staged source presentations from being retained inside cached preview folders when cleanup is delayed.
+
 ## 0.2.0 - 2026-09-13
 
 ### Added

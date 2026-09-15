@@ -48,6 +48,94 @@ public sealed class ComparisonServiceTests
     }
 
     [TestMethod]
+    public async Task SpatiallyRepeatedTitleChangeCountsAsOneTextBlock()
+    {
+        var left = CreatePresentation(CreateSpatialSlide(1, "Old title", "Unchanged body"));
+        var right = CreatePresentation(CreateSpatialSlide(1, "New title", "Unchanged body"));
+
+        var result = await _service.CompareAsync(left, right, TestContext.CancellationToken);
+
+        var slide = result.Slides.Single();
+        Assert.AreEqual("1 text block changed.", slide.ChangeSummary);
+        StringAssert.Contains(slide.LeftBody, "Old title");
+        StringAssert.Contains(slide.RightBody, "New title");
+        var leftVisibleTitle = Assert.IsInstanceOfType<SlideTextParagraphBlock>(
+            slide.LeftBodyContent[0]);
+        var rightVisibleTitle = Assert.IsInstanceOfType<SlideTextParagraphBlock>(
+            slide.RightBodyContent[0]);
+        Assert.AreEqual("Old title", leftVisibleTitle.Paragraph.Text);
+        Assert.AreEqual("New title", rightVisibleTitle.Paragraph.Text);
+    }
+
+    [TestMethod]
+    public async Task UnmarkedBodyMatchingTitleStillCountsAsSeparateTextBlock()
+    {
+        var left = CreatePresentation(new PresentationSlide(
+            1,
+            "Old title",
+            ["Old title", "Old title"],
+            12_192_000,
+            6_858_000,
+            []));
+        var right = CreatePresentation(new PresentationSlide(
+            1,
+            "New title",
+            ["New title", "New title"],
+            12_192_000,
+            6_858_000,
+            []));
+
+        var result = await _service.CompareAsync(left, right, TestContext.CancellationToken);
+
+        Assert.AreEqual("2 text blocks changed.", result.Slides.Single().ChangeSummary);
+    }
+
+    [TestMethod]
+    public async Task RepeatedTitleCannotHideEqualValuedBodyAddition()
+    {
+        var left = CreatePresentation(CreateMarkedSlide(
+            "Old title",
+            repeatedTitleParagraphIndex: 0,
+            "Old title"));
+        var right = CreatePresentation(CreateMarkedSlide(
+            "New title",
+            repeatedTitleParagraphIndex: 1,
+            "Old title",
+            "New title"));
+
+        var result = await _service.CompareAsync(left, right, TestContext.CancellationToken);
+
+        var slide = result.Slides.Single();
+        Assert.AreEqual("2 text blocks changed.", slide.ChangeSummary);
+        Assert.AreEqual(
+            "Old title" + Environment.NewLine + Environment.NewLine + "New title",
+            string.Concat(slide.RightBodySegments!.Select(segment => segment.Text)));
+    }
+
+    [TestMethod]
+    public async Task RepeatedTitleCannotTurnEqualValuedBodyIntoFalseChange()
+    {
+        var left = CreatePresentation(CreateMarkedSlide(
+            "Old title",
+            repeatedTitleParagraphIndex: 0,
+            "Old title",
+            "Old title"));
+        var right = CreatePresentation(CreateMarkedSlide(
+            "New title",
+            repeatedTitleParagraphIndex: 1,
+            "Old title",
+            "New title"));
+
+        var result = await _service.CompareAsync(left, right, TestContext.CancellationToken);
+
+        var slide = result.Slides.Single();
+        Assert.AreEqual("1 text block changed.", slide.ChangeSummary);
+        Assert.AreEqual(
+            "Old title" + Environment.NewLine + Environment.NewLine + "Old title",
+            string.Concat(slide.LeftBodySegments!.Select(segment => segment.Text)));
+    }
+
+    [TestMethod]
     public async Task ReorderedLargeCandidateGroupUsesTheTrueClosestElements()
     {
         const int elementCount = 300;
@@ -122,6 +210,48 @@ public sealed class ComparisonServiceTests
             12_192_000,
             6_858_000,
             elements);
+
+    private static PresentationSlide CreateSpatialSlide(
+        int number,
+        string title,
+        string body)
+    {
+        var titleParagraph = new SlideTextParagraph(
+            [new SlideTextRun(title, new SlideTextStyle())]);
+        var bodyParagraph = new SlideTextParagraph(
+            [new SlideTextRun(body, new SlideTextStyle())]);
+        return new PresentationSlide(
+            number,
+            title,
+            [title, title, body],
+            12_192_000,
+            6_858_000,
+            [])
+        {
+            TitleContent = titleParagraph,
+            TextContent =
+            [
+                new SlideTextParagraphBlock(titleParagraph),
+                new SlideTextParagraphBlock(bodyParagraph)
+            ],
+            RepeatedTitleParagraphIndex = 0
+        };
+    }
+
+    private static PresentationSlide CreateMarkedSlide(
+        string title,
+        int repeatedTitleParagraphIndex,
+        params string[] visibleParagraphs) =>
+        new(
+            1,
+            title,
+            [title, .. visibleParagraphs],
+            12_192_000,
+            6_858_000,
+            [])
+        {
+            RepeatedTitleParagraphIndex = repeatedTitleParagraphIndex
+        };
 
     private static SlideElement CreateElement(
         string id,

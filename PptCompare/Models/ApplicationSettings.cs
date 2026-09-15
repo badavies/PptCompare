@@ -14,7 +14,8 @@ public sealed record PresentationReadLimits(
     int MaxUniqueRelatedParts = 10_000,
     long MaxTotalRelatedPartBytes = 500L * 1024 * 1024,
     int MaxPreviewImageBytes = 25 * 1024 * 1024,
-    long MaxTotalPreviewImageBytes = 100L * 1024 * 1024);
+    long MaxTotalPreviewImageBytes = 100L * 1024 * 1024,
+    long MaxTotalXmlPartBytes = 128L * 1024 * 1024);
 
 public sealed record ApplicationSettings(
     double OutputFontSizePoints = 10,

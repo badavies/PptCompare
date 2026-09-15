@@ -1,6 +1,6 @@
 # PptCompare – Technical and IT Review Summary
 
-**Application version:** 0.2.0
+**Application version:** 0.3.0
 **Software designer:** Ben Davies  
 **Copyright:** © 2026 Ben Davies  
 **Licence:** MIT Licence  

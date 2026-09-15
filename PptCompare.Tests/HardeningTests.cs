@@ -1,5 +1,7 @@
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security;
+using Microsoft.Win32;
 using PptCompare.Services;
 
 namespace PptCompare.Tests;
@@ -64,31 +66,42 @@ public sealed class HardeningTests
     }
 
     [TestMethod]
-    public void StartupCleanupDeletesOnlyOldGuidNamedRenderFolders()
+    public void StartupCleanupDeletesOnlyOldGuidNamedManagedFolders()
     {
         var testRoot = CreateTestDirectory();
-        var oldGuidFolder = Path.Combine(testRoot, Guid.NewGuid().ToString("N"));
-        var recentGuidFolder = Path.Combine(testRoot, Guid.NewGuid().ToString("N"));
-        var unrelatedFolder = Path.Combine(testRoot, "do-not-delete");
+        var renderRoot = Path.Combine(testRoot, "renders");
+        var stagingRoot = Path.Combine(testRoot, "sources");
+        var oldGuidFolder = Path.Combine(renderRoot, Guid.NewGuid().ToString("N"));
+        var recentGuidFolder = Path.Combine(renderRoot, Guid.NewGuid().ToString("N"));
+        var unrelatedFolder = Path.Combine(renderRoot, "do-not-delete");
+        var oldStagingFolder = Path.Combine(stagingRoot, Guid.NewGuid().ToString("N"));
+        var recentStagingFolder = Path.Combine(stagingRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(oldGuidFolder);
         Directory.CreateDirectory(recentGuidFolder);
         Directory.CreateDirectory(unrelatedFolder);
+        Directory.CreateDirectory(oldStagingFolder);
+        Directory.CreateDirectory(recentStagingFolder);
 
         var now = new DateTimeOffset(2026, 9, 12, 12, 0, 0, TimeSpan.Zero);
         Directory.SetLastWriteTimeUtc(oldGuidFolder, now.UtcDateTime.AddDays(-2));
         Directory.SetLastWriteTimeUtc(recentGuidFolder, now.UtcDateTime.AddHours(-2));
         Directory.SetLastWriteTimeUtc(unrelatedFolder, now.UtcDateTime.AddDays(-7));
+        Directory.SetLastWriteTimeUtc(oldStagingFolder, now.UtcDateTime.AddDays(-2));
+        Directory.SetLastWriteTimeUtc(recentStagingFolder, now.UtcDateTime.AddHours(-2));
 
         try
         {
             using var renderer = new PowerPointPresentationRenderer(
                 new RecordingDiagnostics(),
-                testRoot,
-                new FixedTimeProvider(now));
+                renderRoot,
+                new FixedTimeProvider(now),
+                stagingRoot: stagingRoot);
 
             Assert.IsFalse(Directory.Exists(oldGuidFolder));
             Assert.IsTrue(Directory.Exists(recentGuidFolder));
             Assert.IsTrue(Directory.Exists(unrelatedFolder));
+            Assert.IsFalse(Directory.Exists(oldStagingFolder));
+            Assert.IsTrue(Directory.Exists(recentStagingFolder));
         }
         finally
         {
@@ -109,16 +122,19 @@ public sealed class HardeningTests
         var application = new FakePowerPointApplication(userPresentationCount);
         var applicationFactory = new StubPowerPointApplicationFactory(application);
         var launcher = new StubPowerPointProcessLauncher();
+        var renderRoot = Path.Combine(testRoot, "renders");
+        var stagingRoot = Path.Combine(testRoot, "sources");
         try
         {
             using var renderer = new PowerPointPresentationRenderer(
                 new RecordingDiagnostics(),
-                Path.Combine(testRoot, "renders"),
+                renderRoot,
                 TimeProvider.System,
                 detector,
                 applicationFactory,
                 launcher,
-                FastWarmStartOptions);
+                FastWarmStartOptions,
+                stagingRoot: stagingRoot);
 
             var result = await renderer.RenderAsync(presentationPath, 1, TestContext.CancellationToken);
 
@@ -136,7 +152,12 @@ public sealed class HardeningTests
             Assert.AreNotEqual(
                 Path.GetFullPath(presentationPath),
                 application.Presentations.OpenedPath);
+            Assert.IsTrue(IsStrictDescendant(application.Presentations.OpenedPath, stagingRoot));
+            Assert.IsFalse(IsStrictDescendant(application.Presentations.OpenedPath, renderRoot));
             Assert.IsFalse(File.Exists(application.Presentations.OpenedPath));
+            Assert.IsFalse(Directory
+                .EnumerateFiles(renderRoot, "*.ppt*", SearchOption.AllDirectories)
+                .Any());
         }
         finally
         {
@@ -176,6 +197,354 @@ public sealed class HardeningTests
         }
         finally
         {
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
+    public async Task BulkExportWithGapAndExtraFileFallsBackToExactSlideIndexes()
+    {
+        var testRoot = CreateTestDirectory();
+        var presentationPath = Path.Combine(testRoot, "source.pptx");
+        await File.WriteAllBytesAsync(
+            presentationPath,
+            [1, 2, 3, 4],
+            TestContext.CancellationToken);
+        var application = new FakePowerPointApplication(
+            userPresentationCount: 0,
+            previewSlideCount: 3,
+            bulkExportFileNames: ["Slide1.png", "Slide3.png", "Slide4.png"]);
+        try
+        {
+            using var renderer = new PowerPointPresentationRenderer(
+                new RecordingDiagnostics(),
+                Path.Combine(testRoot, "renders"),
+                TimeProvider.System,
+                new StubPowerPointProcessDetector(isRunning: true),
+                new StubPowerPointApplicationFactory(application),
+                new StubPowerPointProcessLauncher(),
+                FastWarmStartOptions);
+
+            var result = await renderer.RenderAsync(
+                presentationPath,
+                3,
+                TestContext.CancellationToken);
+
+            Assert.HasCount(3, result.SlideImages);
+            Assert.AreEqual(1, application.Presentations.PreviewPresentation.ExportCount);
+            Assert.AreEqual(3, application.Presentations.PreviewPresentation.Slides.IndividualExportCount);
+            for (var slideNumber = 1; slideNumber <= 3; slideNumber++)
+            {
+                Assert.IsTrue(result.SlideImages.TryGetValue(slideNumber, out var imagePath));
+                Assert.AreEqual($"slide-{slideNumber:D4}.png", Path.GetFileName(imagePath));
+            }
+        }
+        finally
+        {
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
+    public async Task ReadOnlySourceIsCleanedFromStagingWithoutChangingOriginalAttributes()
+    {
+        var testRoot = CreateTestDirectory();
+        var presentationPath = Path.Combine(testRoot, "source.pptx");
+        var stagingRoot = Path.Combine(testRoot, "sources");
+        await File.WriteAllBytesAsync(
+            presentationPath,
+            [1, 2, 3, 4],
+            TestContext.CancellationToken);
+        File.SetAttributes(presentationPath, FileAttributes.ReadOnly);
+        var application = new FakePowerPointApplication(userPresentationCount: 0);
+        try
+        {
+            using var renderer = new PowerPointPresentationRenderer(
+                new RecordingDiagnostics(),
+                Path.Combine(testRoot, "renders"),
+                TimeProvider.System,
+                new StubPowerPointProcessDetector(isRunning: true),
+                new StubPowerPointApplicationFactory(application),
+                new StubPowerPointProcessLauncher(),
+                FastWarmStartOptions,
+                stagingRoot: stagingRoot);
+
+            var result = await renderer.RenderAsync(
+                presentationPath,
+                1,
+                TestContext.CancellationToken);
+
+            Assert.HasCount(1, result.SlideImages);
+            Assert.IsFalse(File.Exists(application.Presentations.OpenedPath));
+            Assert.IsTrue((File.GetAttributes(presentationPath) & FileAttributes.ReadOnly) != 0);
+            Assert.IsFalse(Directory
+                .EnumerateFiles(stagingRoot, "*.ppt*", SearchOption.AllDirectories)
+                .Any());
+        }
+        finally
+        {
+            if (File.Exists(presentationPath))
+            {
+                File.SetAttributes(presentationPath, FileAttributes.Normal);
+            }
+
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
+    public async Task FailedSourceCleanupStaysOutsidePreviewCacheAndRetriesOnDispose()
+    {
+        var testRoot = CreateTestDirectory();
+        var presentationPath = Path.Combine(testRoot, "source.pptx");
+        var renderRoot = Path.Combine(testRoot, "renders");
+        var stagingRoot = Path.Combine(testRoot, "sources");
+        await File.WriteAllBytesAsync(
+            presentationPath,
+            [1, 2, 3, 4],
+            TestContext.CancellationToken);
+        var application = new FakePowerPointApplication(userPresentationCount: 0);
+        PowerPointPresentationRenderer? renderer = null;
+        var allowCleanup = 0;
+        var cleanupAttempts = 0;
+        try
+        {
+            renderer = new PowerPointPresentationRenderer(
+                new RecordingDiagnostics(),
+                renderRoot,
+                TimeProvider.System,
+                new StubPowerPointProcessDetector(isRunning: true),
+                new StubPowerPointApplicationFactory(application),
+                new StubPowerPointProcessLauncher(),
+                FastWarmStartOptions,
+                stagingRoot: stagingRoot,
+                stagingFolderDeletionOverride: folder =>
+                {
+                    Interlocked.Increment(ref cleanupAttempts);
+                    if (Volatile.Read(ref allowCleanup) == 0)
+                    {
+                        return false;
+                    }
+
+                    Directory.Delete(folder, recursive: true);
+                    return true;
+                });
+
+            var result = await renderer.RenderAsync(
+                presentationPath,
+                1,
+                TestContext.CancellationToken);
+            var stagedPath = application.Presentations.OpenedPath;
+
+            Assert.HasCount(1, result.SlideImages);
+            Assert.IsTrue(File.Exists(stagedPath));
+            Assert.IsTrue(IsStrictDescendant(stagedPath, stagingRoot));
+            Assert.IsFalse(IsStrictDescendant(stagedPath, renderRoot));
+            Assert.IsFalse(Directory
+                .EnumerateFiles(renderRoot, "*.ppt*", SearchOption.AllDirectories)
+                .Any());
+            Assert.AreEqual(1, Volatile.Read(ref cleanupAttempts));
+
+            Volatile.Write(ref allowCleanup, 1);
+            renderer.Dispose();
+            renderer = null;
+
+            Assert.IsFalse(File.Exists(stagedPath));
+            Assert.AreEqual(2, Volatile.Read(ref cleanupAttempts));
+        }
+        finally
+        {
+            Volatile.Write(ref allowCleanup, 1);
+            renderer?.Dispose();
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
+    public void RegisteredLauncherFindsPerUserAppPathBeforeMachineRegistration()
+    {
+        var testRoot = CreateTestDirectory();
+        var executablePath = Path.Combine(testRoot, "POWERPNT.EXE");
+        File.WriteAllBytes(executablePath, [1, 2, 3, 4]);
+        var requests = new List<(RegistryHive Hive, RegistryView View)>();
+        try
+        {
+            var launcher = new RegisteredPowerPointProcessLauncher((hive, view) =>
+            {
+                requests.Add((hive, view));
+                return (hive, view) == (RegistryHive.CurrentUser, RegistryView.Registry32)
+                    ? $"\"{executablePath}\""
+                    : null;
+            });
+
+            var registeredPath = launcher.FindRegisteredPowerPointExecutable();
+
+            Assert.AreEqual(Path.GetFullPath(executablePath), registeredPath);
+            Assert.HasCount(2, requests);
+            Assert.AreEqual(
+                (RegistryHive.CurrentUser, RegistryView.Registry64),
+                requests[0]);
+            Assert.AreEqual(
+                (RegistryHive.CurrentUser, RegistryView.Registry32),
+                requests[1]);
+        }
+        finally
+        {
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
+    public void RegisteredLauncherContinuesAfterInaccessiblePerUserRegistration()
+    {
+        var testRoot = CreateTestDirectory();
+        var executablePath = Path.Combine(testRoot, "POWERPNT.EXE");
+        File.WriteAllBytes(executablePath, [1, 2, 3, 4]);
+        var requests = new List<(RegistryHive Hive, RegistryView View)>();
+        try
+        {
+            var launcher = new RegisteredPowerPointProcessLauncher((hive, view) =>
+            {
+                requests.Add((hive, view));
+                if (hive == RegistryHive.CurrentUser)
+                {
+                    throw new SecurityException("Per-user registration is inaccessible.");
+                }
+
+                return view == RegistryView.Registry64 ? executablePath : null;
+            });
+
+            var registeredPath = launcher.FindRegisteredPowerPointExecutable();
+
+            Assert.AreEqual(Path.GetFullPath(executablePath), registeredPath);
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    (RegistryHive.CurrentUser, RegistryView.Registry64),
+                    (RegistryHive.CurrentUser, RegistryView.Registry32),
+                    (RegistryHive.LocalMachine, RegistryView.Registry64)
+                },
+                requests);
+        }
+        finally
+        {
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
+    public async Task ManagedReparsePointRootFailsClosedBeforeWritingPreviewData()
+    {
+        var testRoot = CreateTestDirectory();
+        var presentationPath = Path.Combine(testRoot, "source.pptx");
+        var renderRoot = Path.Combine(testRoot, "renders");
+        await File.WriteAllBytesAsync(
+            presentationPath,
+            [1, 2, 3, 4],
+            TestContext.CancellationToken);
+        var application = new FakePowerPointApplication(userPresentationCount: 0);
+        var applicationFactory = new StubPowerPointApplicationFactory(application);
+        try
+        {
+            using var renderer = new PowerPointPresentationRenderer(
+                new RecordingDiagnostics(),
+                renderRoot,
+                TimeProvider.System,
+                new StubPowerPointProcessDetector(isRunning: true),
+                applicationFactory,
+                new StubPowerPointProcessLauncher(),
+                FastWarmStartOptions,
+                fileAttributesReader: path => string.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)),
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(renderRoot)),
+                    StringComparison.OrdinalIgnoreCase)
+                    ? FileAttributes.Directory | FileAttributes.ReparsePoint
+                    : File.GetAttributes(path));
+
+            var result = await renderer.RenderAsync(
+                presentationPath,
+                1,
+                TestContext.CancellationToken);
+
+            Assert.IsEmpty(result.SlideImages);
+            Assert.AreEqual(0, applicationFactory.CreateCount);
+            Assert.IsFalse(Directory.Exists(renderRoot));
+        }
+        finally
+        {
+            DeleteTestDirectory(testRoot);
+        }
+    }
+
+    [TestMethod]
+    public async Task LateWorkerCleanupAfterDisposeRetriesStagingFolder()
+    {
+        var testRoot = CreateTestDirectory();
+        var presentationPath = Path.Combine(testRoot, "source.pptx");
+        var stagingRoot = Path.Combine(testRoot, "sources");
+        await File.WriteAllBytesAsync(
+            presentationPath,
+            [1, 2, 3, 4],
+            TestContext.CancellationToken);
+        var application = new FakePowerPointApplication(userPresentationCount: 1);
+        using var applicationFactory = new BlockingFirstPowerPointApplicationFactory(application);
+        var cleanupCompleted = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupAttempts = 0;
+        PowerPointPresentationRenderer? renderer = null;
+        try
+        {
+            renderer = new PowerPointPresentationRenderer(
+                new RecordingDiagnostics(),
+                Path.Combine(testRoot, "renders"),
+                TimeProvider.System,
+                new StubPowerPointProcessDetector(isRunning: true),
+                applicationFactory,
+                new StubPowerPointProcessLauncher(),
+                FastWarmStartOptions,
+                TimeSpan.FromMilliseconds(250),
+                stagingRoot,
+                folder =>
+                {
+                    if (Interlocked.Increment(ref cleanupAttempts) == 1)
+                    {
+                        return false;
+                    }
+
+                    Directory.Delete(folder, recursive: true);
+                    cleanupCompleted.TrySetResult(null);
+                    return true;
+                });
+
+            var timedOutRender = renderer.RenderAsync(
+                presentationPath,
+                1,
+                TestContext.CancellationToken);
+            await applicationFactory.FirstActivationStarted.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.CancellationToken);
+            var result = await timedOutRender.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.CancellationToken);
+            StringAssert.Contains(result.Status, "timed out");
+
+            renderer.Dispose();
+            renderer = null;
+            applicationFactory.ReleaseFirstActivation();
+
+            await cleanupCompleted.Task.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.CancellationToken);
+            Assert.AreEqual(2, Volatile.Read(ref cleanupAttempts));
+            Assert.IsFalse(Directory
+                .EnumerateFiles(stagingRoot, "*.ppt*", SearchOption.AllDirectories)
+                .Any());
+        }
+        finally
+        {
+            renderer?.Dispose();
+            applicationFactory.ReleaseFirstActivation();
+            await applicationFactory.FirstActivationReturned.WaitAsync(TimeSpan.FromSeconds(2));
             DeleteTestDirectory(testRoot);
         }
     }
@@ -313,7 +682,7 @@ public sealed class HardeningTests
             var summary = diagnostics.CreateSupportSummary();
 
             StringAssert.Contains(summary, "Product: PptCompare");
-            StringAssert.Contains(summary, "Version: 0.2.0");
+            StringAssert.Contains(summary, "Version: 0.3.0");
             StringAssert.Contains(summary, "presentation content are not recorded");
             Assert.IsFalse(summary.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase));
             Assert.IsFalse(summary.Contains(testRoot, StringComparison.OrdinalIgnoreCase));
@@ -329,6 +698,15 @@ public sealed class HardeningTests
         var path = Path.Combine(Path.GetTempPath(), "PptCompareTests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static bool IsStrictDescendant(string candidatePath, string rootPath)
+    {
+        var fullCandidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidatePath));
+        var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        return fullCandidate.StartsWith(
+            fullRoot + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static void DeleteTestDirectory(string path)
@@ -537,11 +915,18 @@ public sealed class HardeningTests
         public string CreateSupportSummary() => string.Empty;
     }
 
-    public sealed class FakePowerPointApplication(int userPresentationCount, Action? onQuit = null)
+    public sealed class FakePowerPointApplication(
+        int userPresentationCount,
+        Action? onQuit = null,
+        int previewSlideCount = 1,
+        IReadOnlyList<string>? bulkExportFileNames = null)
     {
         public int AutomationSecurity { get; set; } = 2;
 
-        public FakePowerPointPresentations Presentations { get; } = new(userPresentationCount);
+        public FakePowerPointPresentations Presentations { get; } = new(
+            userPresentationCount,
+            previewSlideCount,
+            bulkExportFileNames);
 
         public bool QuitCalled { get; private set; }
 
@@ -552,7 +937,10 @@ public sealed class HardeningTests
         }
     }
 
-    public sealed class FakePowerPointPresentations(int userPresentationCount)
+    public sealed class FakePowerPointPresentations(
+        int userPresentationCount,
+        int previewSlideCount,
+        IReadOnlyList<string>? bulkExportFileNames)
     {
         private bool _previewPresentationOpen;
 
@@ -578,7 +966,10 @@ public sealed class HardeningTests
             ReadOnlyArgument = readOnly;
             WithWindowArgument = withWindow;
             _previewPresentationOpen = true;
-            PreviewPresentation = new FakePowerPointPresentation(this);
+            PreviewPresentation = new FakePowerPointPresentation(
+                this,
+                previewSlideCount,
+                bulkExportFileNames);
             return PreviewPresentation;
         }
 
@@ -589,9 +980,12 @@ public sealed class HardeningTests
         }
     }
 
-    public sealed class FakePowerPointPresentation(FakePowerPointPresentations owner)
+    public sealed class FakePowerPointPresentation(
+        FakePowerPointPresentations owner,
+        int slideCount,
+        IReadOnlyList<string>? bulkExportFileNames)
     {
-        public FakePowerPointSlides Slides { get; } = new();
+        public FakePowerPointSlides Slides { get; } = new(slideCount);
 
         public FakePowerPointPageSetup PageSetup { get; } = new();
 
@@ -601,15 +995,45 @@ public sealed class HardeningTests
         {
             ExportCount++;
             Directory.CreateDirectory(folder);
-            File.WriteAllBytes(Path.Combine(folder, "Slide1.png"), [1, 2, 3, 4]);
+            var fileNames = bulkExportFileNames ?? Enumerable
+                .Range(1, slideCount)
+                .Select(index => $"Slide{index}.png")
+                .ToArray();
+            foreach (var fileName in fileNames)
+            {
+                File.WriteAllBytes(Path.Combine(folder, fileName), [1, 2, 3, 4]);
+            }
         }
 
         public void Close() => owner.ClosePreview();
     }
 
-    public sealed class FakePowerPointSlides
+    public sealed class FakePowerPointSlides(int count)
     {
-        public int Count { get; } = 1;
+        public int Count { get; } = count;
+
+        public int IndividualExportCount { get; private set; }
+
+        public FakePowerPointSlide Item(int index)
+        {
+            if (index < 1 || index > Count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(index));
+            }
+
+            return new FakePowerPointSlide(this);
+        }
+
+        public void RecordIndividualExport() => IndividualExportCount++;
+    }
+
+    public sealed class FakePowerPointSlide(FakePowerPointSlides owner)
+    {
+        public void Export(string path, string format, int width, int height)
+        {
+            owner.RecordIndividualExport();
+            File.WriteAllBytes(path, [1, 2, 3, 4]);
+        }
     }
 
     public sealed class FakePowerPointPageSetup

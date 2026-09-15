@@ -83,6 +83,13 @@ public interface IPresentationComparisonService
         CancellationToken cancellationToken = default);
 }
 
+internal enum PresentationXmlPartKind
+{
+    SlideLayout,
+    SlideMaster,
+    Theme
+}
+
 public sealed class OpenXmlPresentationSourceService : IPresentationSourceService, IConfigurablePresentationSourceService
 {
     private static readonly XNamespace PresentationNamespace =
@@ -91,12 +98,21 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         "http://schemas.openxmlformats.org/drawingml/2006/main";
     private static readonly XNamespace RelationshipNamespace =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    private readonly Action<PresentationXmlPartKind, Uri>? _xmlConversionObserver;
     private readonly Lock _limitsGate = new();
     private PresentationReadLimits _limits;
 
     public OpenXmlPresentationSourceService(PresentationReadLimits? limits = null)
+        : this(limits, null)
+    {
+    }
+
+    internal OpenXmlPresentationSourceService(
+        PresentationReadLimits? limits,
+        Action<PresentationXmlPartKind, Uri>? xmlConversionObserver)
     {
         _limits = limits ?? new PresentationReadLimits();
+        _xmlConversionObserver = xmlConversionObserver;
         ValidateLimits(_limits);
     }
 
@@ -140,6 +156,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             var presentationPart = document.PresentationPart
                 ?? throw new PresentationLoadException(
                     "The selected file does not contain a readable PowerPoint presentation.");
+            var xmlPartReadBudget = new XmlPartReadBudget(limits);
+            xmlPartReadBudget.RecordPart(presentationPart, cancellationToken);
             var presentationRoot = presentationPart.Presentation
                 ?? throw new PresentationLoadException(
                     "The selected file does not contain a readable presentation root.");
@@ -153,29 +171,44 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                     $"The presentation contains more than the supported limit of {limits.MaxSlides:N0} slides.");
             }
 
-            var slides = new List<PresentationSlide>();
-            long totalCharacters = 0;
-            var relatedPartContext = new RelatedPartReadContext(limits);
-            var slideWidth = presentationRoot.SlideSize?.Cx?.Value ?? 12_192_000L;
-            var slideHeight = presentationRoot.SlideSize?.Cy?.Value ?? 6_858_000L;
+            var slideParts = new List<SlidePart>(slideIds.Count);
             foreach (var slideId in slideIds)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
                 var relationshipId = slideId.RelationshipId?.Value;
-                if (string.IsNullOrWhiteSpace(relationshipId) ||
-                    presentationPart.GetPartById(relationshipId) is not SlidePart slidePart)
+                if (!string.IsNullOrWhiteSpace(relationshipId) &&
+                    presentationPart.GetPartById(relationshipId) is SlidePart slidePart)
                 {
-                    continue;
+                    slideParts.Add(slidePart);
                 }
+            }
 
-                var slideRoot = slidePart.Slide;
-                if (slideRoot is null)
-                {
-                    continue;
-                }
+            var slides = new List<PresentationSlide>();
+            long totalCharacters = 0;
+            var relatedPartContext = new RelatedPartReadContext(limits);
+            var partXmlCache = new PresentationPartXmlCache(
+                slideParts,
+                xmlPartReadBudget,
+                _xmlConversionObserver,
+                cancellationToken);
+            var slideWidth = presentationRoot.SlideSize?.Cx?.Value ?? 12_192_000L;
+            var slideHeight = presentationRoot.SlideSize?.Cy?.Value ?? 6_858_000L;
+            foreach (var slidePart in slideParts)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
 
-                var slideXml = XElement.Parse(slideRoot.OuterXml, LoadOptions.None);
+                xmlPartReadBudget.RecordPart(slidePart, cancellationToken);
+                var slideRoot = slidePart.Slide
+                    ?? throw new PresentationLoadException(
+                        "The selected file contains an invalid PowerPoint slide.");
+                var slideXml = ConvertPartRoot(
+                    slideRoot,
+                    PresentationNamespace + "sld",
+                    "slide",
+                    cancellationToken);
+                var sharedPartData = partXmlCache.GetSharedPartData(
+                    slidePart,
+                    cancellationToken);
                 var paragraphCount = slideXml
                     .Descendants(DrawingNamespace + "p")
                     .Take(limits.MaxParagraphsPerSlide + 1)
@@ -209,8 +242,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                         $"Slide {slides.Count + 1} contains too many table cells to process safely.");
                 }
 
-                var (paragraphs, titleContent, textContent) =
-                    ExtractTextInReadingOrder(slidePart, slideXml);
+                var (paragraphs, titleContent, textContent, repeatedTitleParagraphIndex) =
+                    ExtractTextInReadingOrder(slideXml, sharedPartData);
                 var slideCharacters = 0;
                 foreach (var text in paragraphs)
                 {
@@ -233,6 +266,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                 var elements = ExtractElements(
                     slidePart,
                     slideXml,
+                    sharedPartData,
                     limits,
                     relatedPartContext,
                     cancellationToken);
@@ -245,7 +279,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                     elements)
                 {
                     TitleContent = titleContent,
-                    TextContent = textContent
+                    TextContent = textContent,
+                    RepeatedTitleParagraphIndex = repeatedTitleParagraphIndex
                 });
             }
 
@@ -265,7 +300,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             throw;
         }
         catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or OpenXmlPackageException or
+            exception is IOException or InvalidDataException or UnauthorizedAccessException or
+            OpenXmlPackageException or
             XmlException or FormatException or InvalidOperationException or ArgumentException or
             NotSupportedException or System.Security.SecurityException)
         {
@@ -347,7 +383,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
             limits.MaxUniqueRelatedParts <= 0 ||
             limits.MaxTotalRelatedPartBytes <= 0 ||
             limits.MaxPreviewImageBytes <= 0 ||
-            limits.MaxTotalPreviewImageBytes <= 0)
+            limits.MaxTotalPreviewImageBytes <= 0 ||
+            limits.MaxTotalXmlPartBytes <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(limits), "All presentation read limits must be positive.");
         }
@@ -362,29 +399,50 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         }
     }
 
-    private static ExtractedSlideText ExtractTextInReadingOrder(
-        SlidePart slidePart,
-        XElement slideXml)
+    private static XElement ConvertPartRoot(
+        OpenXmlPartRootElement partRoot,
+        XName expectedRoot,
+        string partDescription,
+        CancellationToken cancellationToken)
     {
-        var themeColors = ReadThemeColors(slidePart);
+        cancellationToken.ThrowIfCancellationRequested();
+        var document = new XDocument();
+        using (var writer = document.CreateWriter())
+        {
+            partRoot.WriteTo(writer);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var root = document.Root;
+        if (root is null || root.Name != expectedRoot)
+        {
+            throw new PresentationLoadException(
+                $"The selected file contains an invalid PowerPoint {partDescription}.");
+        }
+
+        return root;
+    }
+
+    private static ExtractedSlideText ExtractTextInReadingOrder(
+        XElement slideXml,
+        SharedSlidePartData sharedPartData)
+    {
+        var themeColors = sharedPartData.ThemeColors;
         var shapeTree = slideXml.Descendants(PresentationNamespace + "spTree").FirstOrDefault();
         if (shapeTree is null)
         {
             return CreateFallbackText(slideXml, themeColors);
         }
 
-        var layoutXml = slidePart.SlideLayoutPart?.SlideLayout is { } layout
-            ? XElement.Parse(layout.OuterXml, LoadOptions.None)
-            : null;
-        var masterXml = slidePart.SlideLayoutPart?.SlideMasterPart?.SlideMaster is { } master
-            ? XElement.Parse(master.OuterXml, LoadOptions.None)
-            : null;
         var candidates = shapeTree
             .Elements()
             .Where(IsDrawableElement)
             .Select((element, index) => new TextReadingCandidate(
                 index,
-                ResolveBounds(element, layoutXml, masterXml),
+                ResolveBounds(
+                    element,
+                    sharedPartData.LayoutXml,
+                    sharedPartData.MasterXml),
                 IsTitlePlaceholder(element),
                 ExtractTextBlocks(element, themeColors)))
             .Where(candidate => candidate.Paragraphs.Count > 0)
@@ -399,16 +457,35 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         // including that title text at its visible position, in the spatially ordered body.
         var titleCandidate = candidates.FirstOrDefault(candidate => candidate.IsTitle) ?? candidates[0];
         var title = titleCandidate.Paragraphs[0];
-        var blocks = candidates
+        var orderedCandidates = candidates
             .OrderBy(candidate => candidate.HasResolvedBounds ? 0 : 1)
             .ThenBy(candidate => candidate.Bounds.Y)
             .ThenBy(candidate => candidate.Bounds.X)
             .ThenBy(candidate => candidate.DocumentOrder)
+            .ToList();
+        int? repeatedTitleParagraphIndex = null;
+        var paragraphIndex = 0;
+        foreach (var candidate in orderedCandidates)
+        {
+            if (ReferenceEquals(candidate, titleCandidate))
+            {
+                repeatedTitleParagraphIndex = paragraphIndex;
+                break;
+            }
+
+            paragraphIndex += candidate.Paragraphs.Count;
+        }
+
+        var blocks = orderedCandidates
             .SelectMany(candidate => candidate.Blocks)
             .ToList();
         var paragraphs = new List<string> { title.Text };
         paragraphs.AddRange(EnumerateParagraphs(blocks).Select(paragraph => paragraph.Text));
-        return new ExtractedSlideText(paragraphs, title, blocks);
+        return new ExtractedSlideText(
+            paragraphs,
+            title,
+            blocks,
+            repeatedTitleParagraphIndex);
     }
 
     private static ExtractedSlideText CreateFallbackText(
@@ -424,7 +501,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         List<SlideTextBlock> blocks =
             [.. richParagraphs.Select(paragraph => new SlideTextParagraphBlock(paragraph))];
         var plainParagraphs = richParagraphs.Select(paragraph => paragraph.Text).ToList();
-        return new ExtractedSlideText(plainParagraphs, title, blocks);
+        return new ExtractedSlideText(plainParagraphs, title, blocks, null);
     }
 
     private static List<SlideTextBlock> ExtractTextBlocks(
@@ -451,33 +528,106 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         XElement table,
         IReadOnlyDictionary<string, string> themeColors)
     {
+        var sourceRows = table
+            .Elements(DrawingNamespace + "tr")
+            .Select(row => row.Elements(DrawingNamespace + "tc").ToList())
+            .ToList();
+        var extractedRows = new List<List<TableCellBuilder>>(sourceRows.Count);
+        var activeVerticalMerges = new Dictionary<int, ActiveVerticalMerge>();
+        for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
+        {
+            foreach (var column in activeVerticalMerges
+                         .Where(entry => entry.Value.EndRowIndex <= rowIndex)
+                         .Select(entry => entry.Key)
+                         .ToList())
+            {
+                activeVerticalMerges.Remove(column);
+            }
+
+            var extractedCells = new List<TableCellBuilder>();
+            TableCellBuilder? horizontalMergeOrigin = null;
+            var sourceCells = sourceRows[rowIndex];
+            for (var columnIndex = 0; columnIndex < sourceCells.Count; columnIndex++)
+            {
+                var sourceCell = sourceCells[columnIndex];
+                List<SlideTextParagraph> paragraphs =
+                [
+                    .. sourceCell
+                        .Descendants(DrawingNamespace + "p")
+                        .Select(paragraph => ExtractTextParagraph(paragraph, themeColors))
+                        .Where(paragraph => paragraph.Text.Length > 0)
+                ];
+                var isHorizontalContinuation = ReadBooleanAttribute(sourceCell, "hMerge");
+                var isVerticalContinuation = ReadBooleanAttribute(sourceCell, "vMerge");
+                TableCellBuilder? mergeOrigin = null;
+                if (isVerticalContinuation &&
+                    activeVerticalMerges.TryGetValue(columnIndex, out var verticalMerge))
+                {
+                    mergeOrigin = verticalMerge.Cell;
+                }
+
+                if (mergeOrigin is null && isHorizontalContinuation)
+                {
+                    mergeOrigin = horizontalMergeOrigin;
+                }
+
+                if (mergeOrigin is not null)
+                {
+                    mergeOrigin.Paragraphs.AddRange(paragraphs);
+                    horizontalMergeOrigin = mergeOrigin;
+                    continue;
+                }
+
+                if ((isHorizontalContinuation || isVerticalContinuation) && paragraphs.Count == 0)
+                {
+                    horizontalMergeOrigin = null;
+                    continue;
+                }
+
+                var columnSpan = isHorizontalContinuation || isVerticalContinuation
+                    ? 1
+                    : ReadSpan(sourceCell, "gridSpan");
+                var rowSpan = isHorizontalContinuation || isVerticalContinuation
+                    ? 1
+                    : ReadSpan(sourceCell, "rowSpan");
+                var extractedCell = new TableCellBuilder(paragraphs, columnSpan, rowSpan);
+                extractedCells.Add(extractedCell);
+                horizontalMergeOrigin = extractedCell;
+                for (var spannedColumn = columnIndex;
+                     spannedColumn < columnIndex + columnSpan;
+                     spannedColumn++)
+                {
+                    activeVerticalMerges.Remove(spannedColumn);
+                    if (rowSpan > 1)
+                    {
+                        activeVerticalMerges.Add(
+                            spannedColumn,
+                            new ActiveVerticalMerge(extractedCell, rowIndex + rowSpan));
+                    }
+                }
+            }
+
+            extractedRows.Add(extractedCells);
+        }
+
         List<SlideTextTableRow> rows =
         [
-            .. table
-                .Elements(DrawingNamespace + "tr")
-                .Select(row => new SlideTextTableRow(
-                [
-                    .. row
-                        .Elements(DrawingNamespace + "tc")
-                        .Select(cell => new SlideTextTableCell(
-                        [
-                            .. cell
-                                .Descendants(DrawingNamespace + "p")
-                                .Select(paragraph => ExtractTextParagraph(paragraph, themeColors))
-                                .Where(paragraph => paragraph.Text.Length > 0)
-                        ],
-                        ReadSpan(cell, "gridSpan"),
-                        ReadSpan(cell, "rowSpan")))
-                ]))
+            .. extractedRows.Select(row => new SlideTextTableRow(
+                [.. row.Select(cell => cell.ToSlideTextTableCell())]))
         ];
         var gridColumns = table
             .Element(DrawingNamespace + "tblGrid")?
             .Elements(DrawingNamespace + "gridCol")
             .Count() ?? 0;
+        var sourceColumns = sourceRows.Count == 0
+            ? 0
+            : sourceRows.Max(row => row.Count);
         var populatedColumns = rows.Count == 0
             ? 0
             : rows.Max(row => row.Cells.Sum(cell => Math.Max(1, cell.ColumnSpan)));
-        return new SlideTextTableBlock(rows, Math.Max(1, Math.Max(gridColumns, populatedColumns)));
+        return new SlideTextTableBlock(
+            rows,
+            Math.Max(1, Math.Max(sourceColumns, Math.Max(gridColumns, populatedColumns))));
     }
 
     private static int ReadSpan(XElement cell, string attributeName)
@@ -487,6 +637,14 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         return int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var span)
             ? Math.Clamp(span, 1, 100)
             : 1;
+    }
+
+    private static bool ReadBooleanAttribute(XElement cell, string attributeName)
+    {
+        var rawValue = cell.Attribute(attributeName)?.Value ??
+                       cell.Element(DrawingNamespace + "tcPr")?.Attribute(attributeName)?.Value;
+        return rawValue is "1" ||
+               bool.TryParse(rawValue, out var value) && value;
     }
 
     private static IEnumerable<SlideTextParagraph> EnumerateParagraphs(
@@ -709,15 +867,8 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         return IsRgbHex(rawValue) ? $"#{rawValue}" : null;
     }
 
-    private static Dictionary<string, string> ReadThemeColors(SlidePart slidePart)
+    private static Dictionary<string, string> ReadThemeColors(XElement themeXml)
     {
-        var theme = slidePart.SlideLayoutPart?.SlideMasterPart?.ThemePart?.Theme;
-        if (theme is null)
-        {
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        }
-
-        var themeXml = XElement.Parse(theme.OuterXml, LoadOptions.None);
         var colorScheme = themeXml.Descendants(DrawingNamespace + "clrScheme").FirstOrDefault();
         if (colorScheme is null)
         {
@@ -830,6 +981,7 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
     private static List<SlideElement> ExtractElements(
         SlidePart slidePart,
         XElement slideXml,
+        SharedSlidePartData sharedPartData,
         PresentationReadLimits limits,
         RelatedPartReadContext relatedPartContext,
         CancellationToken cancellationToken)
@@ -841,12 +993,6 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
         }
 
         var elements = new List<SlideElement>();
-        var layoutXml = slidePart.SlideLayoutPart?.SlideLayout is { } layout
-            ? XElement.Parse(layout.OuterXml, LoadOptions.None)
-            : null;
-        var masterXml = slidePart.SlideLayoutPart?.SlideMasterPart?.SlideMaster is { } master
-            ? XElement.Parse(master.OuterXml, LoadOptions.None)
-            : null;
         var fallbackId = 0;
         foreach (var element in shapeTree.Elements().Where(IsDrawableElement))
         {
@@ -858,7 +1004,10 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
                 .FirstOrDefault();
             var id = drawingProperties?.Attribute("id")?.Value ?? $"generated-{fallbackId}";
             var name = drawingProperties?.Attribute("name")?.Value ?? $"{kind} {fallbackId}";
-            var bounds = ResolveBounds(element, layoutXml, masterXml);
+            var bounds = ResolveBounds(
+                element,
+                sharedPartData.LayoutXml,
+                sharedPartData.MasterXml);
             var text = string.Join(
                 Environment.NewLine,
                 element.Descendants(DrawingNamespace + "t").Select(value => value.Value));
@@ -1111,9 +1260,246 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
     private sealed record ExtractedSlideText(
         List<string> PlainParagraphs,
         SlideTextParagraph? Title,
-        IReadOnlyList<SlideTextBlock> Blocks);
+        IReadOnlyList<SlideTextBlock> Blocks,
+        int? RepeatedTitleParagraphIndex);
+
+    private sealed class TableCellBuilder(
+        List<SlideTextParagraph> paragraphs,
+        int columnSpan,
+        int rowSpan)
+    {
+        public List<SlideTextParagraph> Paragraphs { get; } = paragraphs;
+
+        public SlideTextTableCell ToSlideTextTableCell() =>
+            new(Paragraphs, columnSpan, rowSpan);
+    }
+
+    private sealed record ActiveVerticalMerge(
+        TableCellBuilder Cell,
+        int EndRowIndex);
 
     private sealed record RelatedContent(string Hash, byte[]? PreviewBytes);
+
+    private sealed record SharedSlidePartData(
+        XElement? LayoutXml,
+        XElement? MasterXml,
+        IReadOnlyDictionary<string, string> ThemeColors);
+
+    private sealed class XmlPartReadBudget(PresentationReadLimits limits)
+    {
+        private const int BufferSize = 64 * 1024;
+        private readonly byte[] _buffer = new byte[BufferSize];
+        private readonly HashSet<Uri> _recordedPartUris = [];
+        private long _totalBytes;
+
+        public void RecordPart(OpenXmlPart part, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_recordedPartUris.Add(part.Uri))
+            {
+                return;
+            }
+
+            using var stream = part.GetStream(FileMode.Open, FileAccess.Read);
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var bytesRead = stream.Read(_buffer);
+                if (bytesRead == 0)
+                {
+                    return;
+                }
+
+                if (bytesRead > limits.MaxTotalXmlPartBytes - _totalBytes)
+                {
+                    throw new PresentationLoadException(
+                        "The presentation contains too much XML data to process safely.");
+                }
+
+                _totalBytes += bytesRead;
+            }
+        }
+    }
+
+    private sealed class PresentationPartXmlCache
+    {
+        private readonly Action<PresentationXmlPartKind, Uri>? _conversionObserver;
+        private readonly Dictionary<Uri, XElement> _layouts = [];
+        private readonly Dictionary<Uri, XElement> _masters = [];
+        private readonly HashSet<Uri> _sharedLayoutUris = [];
+        private readonly HashSet<Uri> _sharedMasterUris = [];
+        private readonly HashSet<Uri> _sharedThemeUris = [];
+        private readonly Dictionary<Uri, IReadOnlyDictionary<string, string>> _themeColors = [];
+        private readonly XmlPartReadBudget _xmlPartReadBudget;
+
+        public PresentationPartXmlCache(
+            IReadOnlyList<SlidePart> slideParts,
+            XmlPartReadBudget xmlPartReadBudget,
+            Action<PresentationXmlPartKind, Uri>? conversionObserver,
+            CancellationToken cancellationToken)
+        {
+            _xmlPartReadBudget = xmlPartReadBudget;
+            _conversionObserver = conversionObserver;
+            var seenLayouts = new HashSet<Uri>();
+            var seenMasters = new HashSet<Uri>();
+            var seenThemes = new HashSet<Uri>();
+            foreach (var slidePart in slideParts)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var layoutPart = slidePart.SlideLayoutPart;
+                if (layoutPart is null)
+                {
+                    continue;
+                }
+
+                RecordPartReference(layoutPart.Uri, seenLayouts, _sharedLayoutUris);
+                var masterPart = layoutPart.SlideMasterPart;
+                if (masterPart is null)
+                {
+                    continue;
+                }
+
+                RecordPartReference(masterPart.Uri, seenMasters, _sharedMasterUris);
+                if (masterPart.ThemePart is { } themePart)
+                {
+                    RecordPartReference(themePart.Uri, seenThemes, _sharedThemeUris);
+                }
+            }
+        }
+
+        public SharedSlidePartData GetSharedPartData(
+            SlidePart slidePart,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var layoutPart = slidePart.SlideLayoutPart;
+            if (layoutPart is null)
+            {
+                return new SharedSlidePartData(
+                    null,
+                    null,
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            }
+
+            var layoutXml = GetOrConvertLayout(layoutPart, cancellationToken);
+            var masterPart = layoutPart.SlideMasterPart;
+            if (masterPart is null)
+            {
+                return new SharedSlidePartData(
+                    layoutXml,
+                    null,
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            }
+
+            var masterXml = GetOrConvertMaster(masterPart, cancellationToken);
+            var themePart = masterPart.ThemePart;
+            return new SharedSlidePartData(
+                layoutXml,
+                masterXml,
+                themePart is null
+                    ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    : GetOrReadThemeColors(themePart, cancellationToken));
+        }
+
+        private static void RecordPartReference(
+            Uri partUri,
+            HashSet<Uri> seenUris,
+            HashSet<Uri> sharedUris)
+        {
+            if (!seenUris.Add(partUri))
+            {
+                sharedUris.Add(partUri);
+            }
+        }
+
+        private XElement GetOrConvertLayout(
+            SlideLayoutPart layoutPart,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _xmlPartReadBudget.RecordPart(layoutPart, cancellationToken);
+            var retain = _sharedLayoutUris.Contains(layoutPart.Uri);
+            if (retain && _layouts.TryGetValue(layoutPart.Uri, out var cachedXml))
+            {
+                return cachedXml;
+            }
+
+            var layoutRoot = layoutPart.SlideLayout
+                ?? throw new PresentationLoadException(
+                    "The selected file contains an invalid PowerPoint slide layout.");
+            var xml = ConvertPartRoot(
+                layoutRoot,
+                PresentationNamespace + "sldLayout",
+                "slide layout",
+                cancellationToken);
+            _conversionObserver?.Invoke(PresentationXmlPartKind.SlideLayout, layoutPart.Uri);
+            if (retain)
+            {
+                _layouts.Add(layoutPart.Uri, xml);
+            }
+
+            return xml;
+        }
+
+        private XElement GetOrConvertMaster(
+            SlideMasterPart masterPart,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _xmlPartReadBudget.RecordPart(masterPart, cancellationToken);
+            var retain = _sharedMasterUris.Contains(masterPart.Uri);
+            if (retain && _masters.TryGetValue(masterPart.Uri, out var cachedXml))
+            {
+                return cachedXml;
+            }
+
+            var masterRoot = masterPart.SlideMaster
+                ?? throw new PresentationLoadException(
+                    "The selected file contains an invalid PowerPoint slide master.");
+            var xml = ConvertPartRoot(
+                masterRoot,
+                PresentationNamespace + "sldMaster",
+                "slide master",
+                cancellationToken);
+            _conversionObserver?.Invoke(PresentationXmlPartKind.SlideMaster, masterPart.Uri);
+            if (retain)
+            {
+                _masters.Add(masterPart.Uri, xml);
+            }
+
+            return xml;
+        }
+
+        private IReadOnlyDictionary<string, string> GetOrReadThemeColors(
+            ThemePart themePart,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _xmlPartReadBudget.RecordPart(themePart, cancellationToken);
+            var retain = _sharedThemeUris.Contains(themePart.Uri);
+            if (retain && _themeColors.TryGetValue(themePart.Uri, out var cachedColors))
+            {
+                return cachedColors;
+            }
+
+            var themeRoot = themePart.Theme
+                ?? throw new PresentationLoadException(
+                    "The selected file contains an invalid PowerPoint theme.");
+            var themeXml = ConvertPartRoot(
+                themeRoot,
+                DrawingNamespace + "theme",
+                "theme",
+                cancellationToken);
+            var colors = ReadThemeColors(themeXml);
+            _conversionObserver?.Invoke(PresentationXmlPartKind.Theme, themePart.Uri);
+            if (retain)
+            {
+                _themeColors.Add(themePart.Uri, colors);
+            }
+
+            return colors;
+        }
+    }
 
     private sealed class RelatedPartReadContext(PresentationReadLimits limits)
     {
@@ -1222,7 +1608,9 @@ public sealed class OpenXmlPresentationSourceService : IPresentationSourceServic
 
 public sealed partial class TextPresentationComparisonService : IPresentationComparisonService
 {
-    private const int MaxDiffTokensPerSide = 4_000;
+    internal const int MaxDiffTokensPerSide = 4_000;
+    internal const int DiffDirectionBitsPerCell = 2;
+    internal static int DiffDirectionChunkSizeBytes => 64 * 1024;
     private const long MaxElementCandidateChecksPerComparison = 2_000_000;
 
     public Task<PresentationComparisonResult> CompareAsync(
@@ -1569,15 +1957,37 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
         var leftBody = FormatBody(left);
         var rightBody = FormatBody(right);
         var titleDiff = BuildWordDiff(left.Title, right.Title, cancellationToken);
+        List<string> leftBodyParagraphs = [.. left.Paragraphs.Skip(1)];
+        List<string> rightBodyParagraphs = [.. right.Paragraphs.Skip(1)];
+        var leftRepeatedTitleParagraphIndex = GetRepeatedTitleParagraphIndex(
+            left,
+            leftBodyParagraphs);
+        var rightRepeatedTitleParagraphIndex = GetRepeatedTitleParagraphIndex(
+            right,
+            rightBodyParagraphs);
         var bodyDiff = BuildParagraphDiff(
-            [.. left.Paragraphs.Skip(1)],
-            [.. right.Paragraphs.Skip(1)],
+            leftBodyParagraphs,
+            rightBodyParagraphs,
             cancellationToken);
+        var changedBodyBlockCount =
+            leftRepeatedTitleParagraphIndex is null &&
+            rightRepeatedTitleParagraphIndex is null
+                ? bodyDiff.ChangedBlocks
+                : CountChangedParagraphs(
+                    ExcludeRepeatedTitleParagraph(
+                        leftBodyParagraphs,
+                        leftRepeatedTitleParagraphIndex,
+                        cancellationToken),
+                    ExcludeRepeatedTitleParagraph(
+                        rightBodyParagraphs,
+                        rightRepeatedTitleParagraphIndex,
+                        cancellationToken),
+                    cancellationToken);
         var titleChanged = !string.Equals(
             Normalize(left.Title),
             Normalize(right.Title),
             StringComparison.Ordinal);
-        var changedBlockCount = bodyDiff.ChangedBlocks + (titleChanged ? 1 : 0);
+        var changedBlockCount = changedBodyBlockCount + (titleChanged ? 1 : 0);
         var elementChanges = CompareElements(
             left.Elements,
             right.Elements,
@@ -1625,6 +2035,41 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
 
     private static string FormatBody(PresentationSlide slide) =>
         string.Join(Environment.NewLine + Environment.NewLine, slide.Paragraphs.Skip(1));
+
+    private static int? GetRepeatedTitleParagraphIndex(
+        PresentationSlide slide,
+        List<string> bodyParagraphs)
+    {
+        var index = slide.RepeatedTitleParagraphIndex;
+        return index is >= 0 &&
+               index < bodyParagraphs.Count &&
+               string.Equals(bodyParagraphs[index.Value], slide.Title, StringComparison.Ordinal)
+            ? index
+            : null;
+    }
+
+    private static List<string> ExcludeRepeatedTitleParagraph(
+        List<string> bodyParagraphs,
+        int? repeatedTitleParagraphIndex,
+        CancellationToken cancellationToken)
+    {
+        if (repeatedTitleParagraphIndex is not { } excludedIndex)
+        {
+            return bodyParagraphs;
+        }
+
+        var result = new List<string>(bodyParagraphs.Count - 1);
+        for (var index = 0; index < bodyParagraphs.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (index != excludedIndex)
+            {
+                result.Add(bodyParagraphs[index]);
+            }
+        }
+
+        return result;
+    }
 
     private static IReadOnlyList<SlideTextBlock> CreateTitleContent(PresentationSlide slide) =>
         slide.TitleContent is null
@@ -2110,6 +2555,33 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
         return (leftSegments, rightSegments, changedBlocks);
     }
 
+    private static int CountChangedParagraphs(
+        List<string> leftParagraphs,
+        List<string> rightParagraphs,
+        CancellationToken cancellationToken)
+    {
+        var matches = FindMatchingParagraphs(
+            leftParagraphs,
+            rightParagraphs,
+            cancellationToken);
+        var changedBlocks = 0;
+        var leftStart = 0;
+        var rightStart = 0;
+        foreach (var match in matches.Append((
+                     Left: leftParagraphs.Count,
+                     Right: rightParagraphs.Count)))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            changedBlocks += Math.Max(
+                match.Left - leftStart,
+                match.Right - rightStart);
+            leftStart = match.Left + 1;
+            rightStart = match.Right + 1;
+        }
+
+        return changedBlocks;
+    }
+
     private static List<(int Left, int Right)> FindMatchingParagraphs(
         List<string> leftParagraphs,
         List<string> rightParagraphs,
@@ -2193,65 +2665,123 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var leftTokens = Tokenize(leftText);
+        var leftTokens = Tokenize(leftText, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        var rightTokens = Tokenize(rightText);
-
-        if (leftTokens.Length > MaxDiffTokensPerSide ||
-            rightTokens.Length > MaxDiffTokensPerSide ||
-            (long)leftTokens.Length * rightTokens.Length > 2_000_000)
+        if (leftTokens.Count > MaxDiffTokensPerSide)
         {
             return (MarkAll(leftText, DiffKind.Removed), MarkAll(rightText, DiffKind.Added));
         }
 
-        var lengths = new int[leftTokens.Length + 1, rightTokens.Length + 1];
-        for (var leftIndex = leftTokens.Length - 1; leftIndex >= 0; leftIndex--)
+        var rightTokens = Tokenize(rightText, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (rightTokens.Count > MaxDiffTokensPerSide ||
+            (long)leftTokens.Count * rightTokens.Count > 2_000_000)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            for (var rightIndex = rightTokens.Length - 1; rightIndex >= 0; rightIndex--)
-            {
-                lengths[leftIndex, rightIndex] = TokensEqual(leftTokens[leftIndex], rightTokens[rightIndex])
-                    ? lengths[leftIndex + 1, rightIndex + 1] + 1
-                    : Math.Max(lengths[leftIndex + 1, rightIndex], lengths[leftIndex, rightIndex + 1]);
-            }
+            return (MarkAll(leftText, DiffKind.Removed), MarkAll(rightText, DiffKind.Added));
         }
 
-        var leftSegments = new List<DiffSegment>();
-        var rightSegments = new List<DiffSegment>();
+        var directions = new ChunkedDiffDirectionMatrix(leftTokens.Count, rightTokens.Count);
+        var nextLengths = new int[rightTokens.Count + 1];
+        var currentLengths = new int[rightTokens.Count + 1];
+        for (var leftIndex = leftTokens.Count - 1; leftIndex >= 0; leftIndex--)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            currentLengths[rightTokens.Count] = 0;
+            for (var rightIndex = rightTokens.Count - 1; rightIndex >= 0; rightIndex--)
+            {
+                if (TokensEqual(
+                        leftText,
+                        leftTokens[leftIndex],
+                        rightText,
+                        rightTokens[rightIndex]))
+                {
+                    currentLengths[rightIndex] = nextLengths[rightIndex + 1] + 1;
+                    directions.Set(leftIndex, rightIndex, DiffDirection.Match);
+                }
+                else if (nextLengths[rightIndex] >= currentLengths[rightIndex + 1])
+                {
+                    currentLengths[rightIndex] = nextLengths[rightIndex];
+                    directions.Set(leftIndex, rightIndex, DiffDirection.RemoveLeft);
+                }
+                else
+                {
+                    currentLengths[rightIndex] = currentLengths[rightIndex + 1];
+                    directions.Set(leftIndex, rightIndex, DiffDirection.AddRight);
+                }
+            }
+
+            (currentLengths, nextLengths) = (nextLengths, currentLengths);
+        }
+
+        var leftSegments = new DiffSegmentAccumulator(leftText);
+        var rightSegments = new DiffSegmentAccumulator(rightText);
         var i = 0;
         var j = 0;
 
-        while (i < leftTokens.Length || j < rightTokens.Length)
+        while (i < leftTokens.Count || j < rightTokens.Count)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (i < leftTokens.Length && j < rightTokens.Length &&
-                TokensEqual(leftTokens[i], rightTokens[j]))
+            if (i >= leftTokens.Count)
             {
-                AppendSegment(leftSegments, leftTokens[i++], DiffKind.Unchanged);
-                AppendSegment(rightSegments, rightTokens[j++], DiffKind.Unchanged);
+                rightSegments.Append(rightTokens[j++], DiffKind.Added);
+                continue;
             }
-            else if (i < leftTokens.Length &&
-                     (j == rightTokens.Length || lengths[i + 1, j] >= lengths[i, j + 1]))
+
+            if (j >= rightTokens.Count)
             {
-                AppendSegment(leftSegments, leftTokens[i++], DiffKind.Removed);
+                leftSegments.Append(leftTokens[i++], DiffKind.Removed);
+                continue;
             }
-            else
+
+            switch (directions.Get(i, j))
             {
-                AppendSegment(rightSegments, rightTokens[j++], DiffKind.Added);
+                case DiffDirection.Match:
+                    leftSegments.Append(leftTokens[i++], DiffKind.Unchanged);
+                    rightSegments.Append(rightTokens[j++], DiffKind.Unchanged);
+                    break;
+                case DiffDirection.RemoveLeft:
+                    leftSegments.Append(leftTokens[i++], DiffKind.Removed);
+                    break;
+                case DiffDirection.AddRight:
+                    rightSegments.Append(rightTokens[j++], DiffKind.Added);
+                    break;
+                default:
+                    throw new InvalidOperationException("The word-diff direction is invalid.");
             }
         }
 
-        return (leftSegments, rightSegments);
+        return (leftSegments.Build(), rightSegments.Build());
     }
 
-    private static string[] Tokenize(string text) =>
-        [.. DiffTokenRegex().Matches(text).Select(match => match.Value)];
+    private static List<DiffToken> Tokenize(
+        string text,
+        CancellationToken cancellationToken)
+    {
+        var tokens = new List<DiffToken>(Math.Min(text.Length, MaxDiffTokensPerSide + 1));
+        foreach (var match in DiffTokenRegex().EnumerateMatches(text))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            tokens.Add(new DiffToken(match.Index, match.Length));
+            if (tokens.Count > MaxDiffTokensPerSide)
+            {
+                break;
+            }
+        }
+
+        return tokens;
+    }
 
     [GeneratedRegex(@"\s+|[^\s]+", RegexOptions.NonBacktracking)]
     private static partial Regex DiffTokenRegex();
 
-    private static bool TokensEqual(string left, string right) =>
-        string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+    private static bool TokensEqual(
+        string leftText,
+        DiffToken leftToken,
+        string rightText,
+        DiffToken rightToken) =>
+        leftText.AsSpan(leftToken.Start, leftToken.Length).Equals(
+            rightText.AsSpan(rightToken.Start, rightToken.Length),
+            StringComparison.OrdinalIgnoreCase);
 
     private static void AppendSegment(List<DiffSegment> segments, string text, DiffKind kind)
     {
@@ -2262,5 +2792,117 @@ public sealed partial class TextPresentationComparisonService : IPresentationCom
         }
 
         segments.Add(new DiffSegment(text, kind));
+    }
+
+    private readonly record struct DiffToken(int Start, int Length);
+
+    private enum DiffDirection : byte
+    {
+        Match,
+        RemoveLeft,
+        AddRight
+    }
+
+    private sealed class ChunkedDiffDirectionMatrix
+    {
+        private const int DirectionsPerByte = 8 / DiffDirectionBitsPerCell;
+        private readonly byte[][] _chunks;
+        private readonly int _columnCount;
+
+        public ChunkedDiffDirectionMatrix(int rowCount, int columnCount)
+        {
+            _columnCount = columnCount;
+            var cellCount = checked((long)rowCount * columnCount);
+            var byteCount = (cellCount + DirectionsPerByte - 1) / DirectionsPerByte;
+            var chunkCount = checked((int)(
+                (byteCount + DiffDirectionChunkSizeBytes - 1) /
+                DiffDirectionChunkSizeBytes));
+            _chunks = new byte[chunkCount][];
+
+            var remainingBytes = byteCount;
+            for (var index = 0; index < _chunks.Length; index++)
+            {
+                var currentChunkSize = (int)Math.Min(
+                    remainingBytes,
+                    DiffDirectionChunkSizeBytes);
+                _chunks[index] = new byte[currentChunkSize];
+                remainingBytes -= currentChunkSize;
+            }
+        }
+
+        public void Set(int row, int column, DiffDirection direction)
+        {
+            var cellIndex = checked((long)row * _columnCount + column);
+            var byteIndex = cellIndex / DirectionsPerByte;
+            var chunkIndex = (int)(byteIndex / DiffDirectionChunkSizeBytes);
+            var indexInChunk = (int)(byteIndex % DiffDirectionChunkSizeBytes);
+            var shift = (int)(cellIndex % DirectionsPerByte) * DiffDirectionBitsPerCell;
+            _chunks[chunkIndex][indexInChunk] |= (byte)((byte)direction << shift);
+        }
+
+        public DiffDirection Get(int row, int column)
+        {
+            var cellIndex = checked((long)row * _columnCount + column);
+            var byteIndex = cellIndex / DirectionsPerByte;
+            var chunkIndex = (int)(byteIndex / DiffDirectionChunkSizeBytes);
+            var indexInChunk = (int)(byteIndex % DiffDirectionChunkSizeBytes);
+            var shift = (int)(cellIndex % DirectionsPerByte) * DiffDirectionBitsPerCell;
+            return (DiffDirection)((_chunks[chunkIndex][indexInChunk] >> shift) & 0b11);
+        }
+    }
+
+    private sealed class DiffSegmentAccumulator(string source)
+    {
+        private readonly List<DiffSegment> _segments = [];
+        private int _runStart;
+        private int _runEnd;
+        private DiffKind _runKind;
+        private bool _hasRun;
+
+        public void Append(DiffToken token, DiffKind kind)
+        {
+            if (!_hasRun)
+            {
+                StartRun(token, kind);
+                return;
+            }
+
+            if (_runKind == kind)
+            {
+                _runEnd = checked(token.Start + token.Length);
+                return;
+            }
+
+            Flush();
+            StartRun(token, kind);
+        }
+
+        public List<DiffSegment> Build()
+        {
+            Flush();
+            return _segments;
+        }
+
+        private void StartRun(DiffToken token, DiffKind kind)
+        {
+            _runStart = token.Start;
+            _runEnd = checked(token.Start + token.Length);
+            _runKind = kind;
+            _hasRun = true;
+        }
+
+        private void Flush()
+        {
+            if (!_hasRun)
+            {
+                return;
+            }
+
+            var text = _runStart == 0 && _runEnd == source.Length
+                ? source
+                : source[_runStart.._runEnd];
+            _segments.Add(new DiffSegment(text, _runKind));
+            _hasRun = false;
+        }
     }
 }

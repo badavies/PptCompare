@@ -237,7 +237,7 @@ public sealed class ApplicationSettingsTests
         Assert.AreEqual("PptCompare", productName);
         Assert.AreEqual("Ben Davies", designer);
         Assert.AreEqual("© 2026 Ben Davies", copyright);
-        Assert.AreEqual("0.2.0", ApplicationInfo.Version);
+        Assert.AreEqual("0.3.0", ApplicationInfo.Version);
     }
 
     private static (string Folder, string Path) CreateIsolatedSettingsPath()

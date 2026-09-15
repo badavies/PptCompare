@@ -18,12 +18,16 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     private static readonly TimeSpan StaleRenderFolderAge = TimeSpan.FromHours(24);
     private readonly Lock _renderFolderGate = new();
     private readonly SemaphoreSlim _renderSemaphore = new(1, 1);
+    private readonly HashSet<string> _failedStagingFolders = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<string> _renderFolders = new();
     private readonly IPowerPointApplicationFactory _applicationFactory;
     private readonly IApplicationDiagnostics _diagnostics;
     private readonly IPowerPointProcessLauncher _powerPointProcessLauncher;
     private readonly IPowerPointProcessDetector _powerPointProcessDetector;
+    private readonly Func<string, FileAttributes> _fileAttributesReader;
     private readonly string _renderRoot;
+    private readonly string _stagingRoot;
+    private readonly Func<string, bool>? _stagingFolderDeletionOverride;
     private readonly TimeSpan _renderTimeout;
     private readonly TimeProvider _timeProvider;
     private readonly PowerPointWarmStartOptions _warmStartOptions;
@@ -49,11 +53,25 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         IPowerPointApplicationFactory? applicationFactory = null,
         IPowerPointProcessLauncher? powerPointProcessLauncher = null,
         PowerPointWarmStartOptions? warmStartOptions = null,
-        TimeSpan? renderTimeout = null)
+        TimeSpan? renderTimeout = null,
+        string? stagingRoot = null,
+        Func<string, bool>? stagingFolderDeletionOverride = null,
+        Func<string, FileAttributes>? fileAttributesReader = null)
     {
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         ArgumentException.ThrowIfNullOrWhiteSpace(renderRoot);
-        _renderRoot = Path.GetFullPath(renderRoot);
+        _renderRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(renderRoot));
+        _stagingRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+            stagingRoot ?? $"{_renderRoot}-sources"));
+        if (PathsOverlap(_renderRoot, _stagingRoot))
+        {
+            throw new ArgumentException(
+                "The preview output and source-staging folders must be separate.",
+                nameof(stagingRoot));
+        }
+
+        _stagingFolderDeletionOverride = stagingFolderDeletionOverride;
+        _fileAttributesReader = fileAttributesReader ?? File.GetAttributes;
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _powerPointProcessDetector = powerPointProcessDetector ?? new SystemPowerPointProcessDetector();
         _applicationFactory = applicationFactory ?? new ComPowerPointApplicationFactory();
@@ -69,6 +87,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
 
         CleanupStaleRenderFolders();
+        CleanupStaleStagingFolders();
     }
 
     public async Task<SlideRenderingResult> RenderAsync(
@@ -330,8 +349,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
             trace.Record("temporary-copy-started");
             outputFolder = CreateRenderFolder();
             stagedPresentationPath = CreateStagedPresentationCopy(
-                presentationPath,
-                outputFolder);
+                presentationPath);
             trace.Record("temporary-copy-completed");
 
             if (!powerPointWasAlreadyRunning)
@@ -387,7 +405,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
 
             cancellationToken.ThrowIfCancellationRequested();
             var bulkFolder = Path.Combine(outputFolder, "bulk");
-            Directory.CreateDirectory(bulkFolder);
+            CreateManagedDirectory(bulkFolder, _renderRoot, allowRoot: false);
             Dictionary<int, string> images;
             stage = "bulk-export";
             trace.Record("bulk-export-started");
@@ -782,9 +800,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
     }
 
-    private static string CreateStagedPresentationCopy(
-        string presentationPath,
-        string outputFolder)
+    private string CreateStagedPresentationCopy(string presentationPath)
     {
         var sourcePath = Path.GetFullPath(presentationPath);
         var extension = Path.GetExtension(sourcePath);
@@ -795,11 +811,32 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 "Only .pptx and .pptm presentations can be rendered.");
         }
 
-        var stagingFolder = Path.Combine(outputFolder, "source");
-        Directory.CreateDirectory(stagingFolder);
+        CreateManagedDirectory(_stagingRoot, _stagingRoot, allowRoot: true);
+        var stagingFolder = Path.Combine(_stagingRoot, Guid.NewGuid().ToString("N"));
+        CreateManagedDirectory(stagingFolder, _stagingRoot, allowRoot: false);
         var stagedPath = Path.Combine(stagingFolder, $"preview{extension.ToLowerInvariant()}");
-        File.Copy(sourcePath, stagedPath, overwrite: false);
-        return stagedPath;
+        try
+        {
+            if (!IsManagedPathSafe(stagingFolder, _stagingRoot, allowRoot: false))
+            {
+                throw new IOException("The preview source-staging path is not safe to use.");
+            }
+
+            File.Copy(sourcePath, stagedPath, overwrite: false);
+            MakeStagedFileWritable(stagedPath, stagingFolder);
+            return stagedPath;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or SecurityException or
+            NotSupportedException)
+        {
+            if (!DeleteStagingFolder(stagingFolder))
+            {
+                TrackOrRetryFailedStagingFolder(stagingFolder);
+            }
+
+            throw;
+        }
     }
 
     private void DeleteStagedPresentation(string? stagedPresentationPath)
@@ -810,18 +847,65 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
 
         var stagingFolder = Path.GetDirectoryName(stagedPresentationPath);
-        if (stagingFolder is not null && !DeleteRenderFolder(stagingFolder))
+        if (stagingFolder is null)
         {
-            _diagnostics.RecordEvent("PreviewSourceCleanupDeferred");
+            return;
+        }
+
+        if (DeleteStagingFolder(stagingFolder))
+        {
+            ForgetFailedStagingFolder(stagingFolder);
+        }
+        else
+        {
+            TrackOrRetryFailedStagingFolder(stagingFolder);
         }
     }
 
     private string CreateRenderFolder()
     {
-        Directory.CreateDirectory(_renderRoot);
+        CreateManagedDirectory(_renderRoot, _renderRoot, allowRoot: true);
         var folder = Path.Combine(_renderRoot, Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(folder);
+        CreateManagedDirectory(folder, _renderRoot, allowRoot: false);
         return folder;
+    }
+
+    private void CreateManagedDirectory(string path, string root, bool allowRoot)
+    {
+        if (!IsManagedPathSafe(path, root, allowRoot))
+        {
+            throw new IOException("The managed preview path is not safe to use.");
+        }
+
+        Directory.CreateDirectory(path);
+        if (!IsManagedPathSafe(path, root, allowRoot))
+        {
+            throw new IOException("The managed preview path is not safe to use.");
+        }
+    }
+
+    private void MakeStagedFileWritable(string stagedPath, string stagingFolder)
+    {
+        if (!IsManagedPathSafe(stagingFolder, _stagingRoot, allowRoot: false))
+        {
+            throw new IOException("The preview source-staging path is not safe to use.");
+        }
+
+        var attributes = _fileAttributesReader(stagedPath);
+        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+        {
+            throw new IOException("The staged presentation is not a regular file.");
+        }
+
+        if ((attributes & FileAttributes.ReadOnly) == 0)
+        {
+            return;
+        }
+
+        var writableAttributes = attributes & ~FileAttributes.ReadOnly;
+        File.SetAttributes(
+            stagedPath,
+            writableAttributes == 0 ? FileAttributes.Normal : writableAttributes);
     }
 
     private static (int Width, int Height) CalculateExportSize(
@@ -844,33 +928,37 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 MidpointRounding.AwayFromZero)), longestEdge);
     }
 
-    private static Dictionary<int, string> CollectExportedImages(
+    private Dictionary<int, string> CollectExportedImages(
         string outputFolder,
         int expectedCount)
     {
-        var files = Directory
-            .EnumerateFiles(outputFolder, "*.png", SearchOption.TopDirectoryOnly)
-            .Select(path => new FileInfo(path))
-            .Where(file => file.Length is > 0 and <= MaxRenderedImageBytes)
-            .OrderBy(file => ReadTrailingNumber(file.Name))
-            .ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
-            .Take(expectedCount)
-            .ToList();
         var images = new Dictionary<int, string>();
-        long totalBytes = 0;
-
-        for (var index = 0; index < files.Count; index++)
+        if (!IsManagedPathSafe(outputFolder, _renderRoot, allowRoot: false))
         {
-            totalBytes += files[index].Length;
-            if (totalBytes > MaxRenderedPresentationBytes)
-            {
-                break;
-            }
-
-            images[index + 1] = files[index].FullName;
+            return images;
         }
 
-        return images;
+        long totalBytes = 0;
+        foreach (var path in Directory.EnumerateFiles(
+                     outputFolder,
+                     "*.png",
+                     SearchOption.TopDirectoryOnly))
+        {
+            var file = new FileInfo(path);
+            var slideNumber = ReadTrailingNumber(file.Name);
+            if (slideNumber is < 1 || slideNumber > expectedCount ||
+                file.Length is <= 0 or > MaxRenderedImageBytes ||
+                images.ContainsKey(slideNumber) ||
+                file.Length > MaxRenderedPresentationBytes - totalBytes)
+            {
+                return [];
+            }
+
+            totalBytes += file.Length;
+            images.Add(slideNumber, file.FullName);
+        }
+
+        return images.Count == expectedCount ? images : [];
     }
 
     private Dictionary<int, string> ExportSlidesIndividually(
@@ -883,10 +971,20 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
     {
         dynamic slides = slideCollection;
         var images = new Dictionary<int, string>();
+        if (!IsManagedPathSafe(outputFolder, _renderRoot, allowRoot: false))
+        {
+            return images;
+        }
+
         long totalBytes = 0;
         for (var index = 1; index <= slideCount; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (!IsManagedPathSafe(outputFolder, _renderRoot, allowRoot: false))
+            {
+                break;
+            }
+
             object? slide = null;
             try
             {
@@ -981,11 +1079,70 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
     }
 
-    private void CleanupStaleRenderFolders()
+    private void TrackOrRetryFailedStagingFolder(string folder)
+    {
+        var fullPath = Path.GetFullPath(folder);
+        var retryAfterDisposal = false;
+        lock (_renderFolderGate)
+        {
+            if (_disposed)
+            {
+                retryAfterDisposal = true;
+            }
+            else
+            {
+                _failedStagingFolders.Add(fullPath);
+            }
+        }
+
+        if (retryAfterDisposal && DeleteStagingFolder(fullPath))
+        {
+            return;
+        }
+
+        _diagnostics.RecordEvent("PreviewSourceCleanupDeferred");
+    }
+
+    private void ForgetFailedStagingFolder(string folder)
+    {
+        lock (_renderFolderGate)
+        {
+            _failedStagingFolders.Remove(Path.GetFullPath(folder));
+        }
+    }
+
+    private void CleanupStaleRenderFolders() => CleanupStaleFolders(
+        _renderRoot,
+        DeleteRenderFolder,
+        "StalePreviewFolderInspectionFailed",
+        "StalePreviewCleanupCompleted",
+        "StalePreviewCleanupFailed");
+
+    private void CleanupStaleStagingFolders() => CleanupStaleFolders(
+        _stagingRoot,
+        DeleteStagingFolder,
+        "StalePreviewSourceFolderInspectionFailed",
+        "StalePreviewSourceCleanupCompleted",
+        "StalePreviewSourceCleanupFailed");
+
+    private void CleanupStaleFolders(
+        string root,
+        Func<string, bool> deleteFolder,
+        string inspectionFailureEvent,
+        string completionEvent,
+        string cleanupFailureEvent)
     {
         try
         {
-            if (!Directory.Exists(_renderRoot))
+            if (!IsManagedPathSafe(root, root, allowRoot: true))
+            {
+                _diagnostics.RecordEvent(
+                    cleanupFailureEvent,
+                    "reason=unsafe-managed-root");
+                return;
+            }
+
+            if (!Directory.Exists(root))
             {
                 return;
             }
@@ -993,14 +1150,19 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
             var cutoff = _timeProvider.GetUtcNow().UtcDateTime - StaleRenderFolderAge;
             var deletedCount = 0;
             foreach (var folder in Directory.EnumerateDirectories(
-                         _renderRoot,
+                         root,
                          "*",
                          SearchOption.TopDirectoryOnly))
             {
                 try
                 {
+                    if (!IsManagedPathSafe(folder, root, allowRoot: false))
+                    {
+                        continue;
+                    }
+
                     var folderName = Path.GetFileName(folder);
-                    var attributes = File.GetAttributes(folder);
+                    var attributes = _fileAttributesReader(folder);
                     if (!Guid.TryParseExact(folderName, "N", out _) ||
                         (attributes & FileAttributes.ReparsePoint) != 0 ||
                         Directory.GetLastWriteTimeUtc(folder) > cutoff)
@@ -1008,7 +1170,7 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                         continue;
                     }
 
-                    if (DeleteRenderFolder(folder))
+                    if (deleteFolder(folder))
                     {
                         deletedCount++;
                     }
@@ -1016,45 +1178,212 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
                 catch (Exception exception) when (
                     exception is IOException or UnauthorizedAccessException or SecurityException)
                 {
-                    _diagnostics.RecordException("StalePreviewFolderInspectionFailed", exception);
+                    _diagnostics.RecordException(inspectionFailureEvent, exception);
                 }
             }
 
             if (deletedCount > 0)
             {
                 _diagnostics.RecordEvent(
-                    "StalePreviewCleanupCompleted",
+                    completionEvent,
                     $"folders={deletedCount.ToString(CultureInfo.InvariantCulture)}");
             }
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or SecurityException)
         {
-            _diagnostics.RecordException("StalePreviewCleanupFailed", exception);
+            _diagnostics.RecordException(cleanupFailureEvent, exception);
         }
     }
 
-    private bool DeleteRenderFolder(string folder)
+    private bool DeleteRenderFolder(string folder) => DeleteManagedFolder(
+        folder,
+        _renderRoot,
+        "PreviewFolderCleanupFailed");
+
+    private bool DeleteStagingFolder(string folder)
     {
         try
         {
             var fullPath = Path.GetFullPath(folder);
-            var rootWithSeparator = _renderRoot.TrimEnd(Path.DirectorySeparatorChar) +
-                                    Path.DirectorySeparatorChar;
-            if (fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) &&
-                Directory.Exists(fullPath))
+            if (!IsManagedPathSafe(fullPath, _stagingRoot, allowRoot: false))
             {
-                Directory.Delete(fullPath, true);
-                return true;
+                return false;
             }
+
+            if (_stagingFolderDeletionOverride is not null)
+            {
+                return _stagingFolderDeletionOverride(fullPath);
+            }
+
+            if (!PrepareStagingFolderForDeletion(fullPath))
+            {
+                return false;
+            }
+
+            return DeleteManagedFolder(
+                fullPath,
+                _stagingRoot,
+                "PreviewSourceFolderCleanupFailed");
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or SecurityException)
         {
-            _diagnostics.RecordException("PreviewFolderCleanupFailed", exception);
+            _diagnostics.RecordException("PreviewSourceFolderCleanupFailed", exception);
+            return false;
+        }
+    }
+
+    private bool DeleteManagedFolder(string folder, string root, string failureEventName)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(folder);
+            if (!IsManagedPathSafe(fullPath, root, allowRoot: false))
+            {
+                return false;
+            }
+
+            if (!Directory.Exists(fullPath))
+            {
+                return true;
+            }
+
+            var attributes = _fileAttributesReader(fullPath);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            if (!IsManagedPathSafe(fullPath, root, allowRoot: false))
+            {
+                return false;
+            }
+
+            Directory.Delete(fullPath, true);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            _diagnostics.RecordException(failureEventName, exception);
         }
 
         return false;
+    }
+
+    private bool PrepareStagingFolderForDeletion(string folder)
+    {
+        if (!Directory.Exists(folder))
+        {
+            return true;
+        }
+
+        foreach (var fileName in new[] { "preview.pptx", "preview.pptm" })
+        {
+            var stagedPath = Path.Combine(folder, fileName);
+            FileAttributes attributes;
+            try
+            {
+                attributes = _fileAttributesReader(stagedPath);
+            }
+            catch (FileNotFoundException)
+            {
+                continue;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                continue;
+            }
+
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            {
+                return false;
+            }
+
+            if ((attributes & FileAttributes.ReadOnly) == 0)
+            {
+                continue;
+            }
+
+            var writableAttributes = attributes & ~FileAttributes.ReadOnly;
+            File.SetAttributes(
+                stagedPath,
+                writableAttributes == 0 ? FileAttributes.Normal : writableAttributes);
+        }
+
+        return true;
+    }
+
+    private bool IsManagedPathSafe(string candidatePath, string rootPath, bool allowRoot)
+    {
+        try
+        {
+            var fullCandidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidatePath));
+            var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+            if ((!allowRoot || !string.Equals(
+                    fullCandidate,
+                    fullRoot,
+                    StringComparison.OrdinalIgnoreCase)) &&
+                !IsStrictDescendant(fullCandidate, fullRoot))
+            {
+                return false;
+            }
+
+            string? currentPath = fullCandidate;
+            while (currentPath is not null)
+            {
+                try
+                {
+                    var attributes = _fileAttributesReader(currentPath);
+                    if ((attributes & FileAttributes.Directory) == 0 ||
+                        (attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        return false;
+                    }
+                }
+                catch (FileNotFoundException)
+                {
+                    // Missing managed folders are safe to create below a validated ancestor.
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    // Missing managed folders are safe to create below a validated ancestor.
+                }
+
+                var parent = Directory.GetParent(currentPath)?.FullName;
+                if (parent is null || string.Equals(
+                        parent,
+                        currentPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                currentPath = Path.TrimEndingDirectorySeparator(parent);
+            }
+
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or SecurityException or
+            NotSupportedException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool PathsOverlap(string firstPath, string secondPath) =>
+        string.Equals(firstPath, secondPath, StringComparison.OrdinalIgnoreCase) ||
+        IsStrictDescendant(firstPath, secondPath) ||
+        IsStrictDescendant(secondPath, firstPath);
+
+    private static bool IsStrictDescendant(string candidatePath, string rootPath)
+    {
+        var fullCandidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidatePath));
+        var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        var rootWithSeparator = fullRoot + Path.DirectorySeparatorChar;
+        return fullCandidate.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ReleaseComObject(object? value)
@@ -1111,11 +1440,14 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
         }
 
         List<string> foldersToDelete;
+        List<string> stagingFoldersToRetry;
         lock (_renderFolderGate)
         {
             _disposed = true;
             foldersToDelete = [.. _renderFolders];
             _renderFolders.Clear();
+            stagingFoldersToRetry = [.. _failedStagingFolders];
+            _failedStagingFolders.Clear();
         }
 
         foreach (var folder in foldersToDelete)
@@ -1123,6 +1455,13 @@ public sealed class PowerPointPresentationRenderer : IPresentationRenderer
             DeleteRenderFolder(folder);
         }
 
+        foreach (var folder in stagingFoldersToRetry)
+        {
+            if (!DeleteStagingFolder(folder))
+            {
+                _diagnostics.RecordEvent("PreviewSourceCleanupDeferred");
+            }
+        }
     }
 }
 
@@ -1193,6 +1532,23 @@ internal sealed class RegisteredPowerPointProcessLauncher : IPowerPointProcessLa
 {
     private const string PowerPointAppPath =
         @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\POWERPNT.EXE";
+    private static readonly RegistryHive[] RegistryHives =
+        [RegistryHive.CurrentUser, RegistryHive.LocalMachine];
+    private static readonly RegistryView[] RegistryViews =
+        [RegistryView.Registry64, RegistryView.Registry32];
+    private readonly Func<RegistryHive, RegistryView, string?> _registeredPathReader;
+
+    public RegisteredPowerPointProcessLauncher()
+        : this(ReadRegisteredPowerPointPath)
+    {
+    }
+
+    internal RegisteredPowerPointProcessLauncher(
+        Func<RegistryHive, RegistryView, string?> registeredPathReader)
+    {
+        _registeredPathReader = registeredPathReader ??
+                                throw new ArgumentNullException(nameof(registeredPathReader));
+    }
 
     public void StartPowerPoint()
     {
@@ -1209,31 +1565,54 @@ internal sealed class RegisteredPowerPointProcessLauncher : IPowerPointProcessLa
             ?? throw new InvalidOperationException("Microsoft PowerPoint did not start.");
     }
 
-    private static string? FindRegisteredPowerPointExecutable()
+    internal string? FindRegisteredPowerPointExecutable()
     {
-        foreach (var registryView in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        foreach (var registryHive in RegistryHives)
         {
-            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, registryView);
-            using var appPathKey = baseKey.OpenSubKey(PowerPointAppPath, writable: false);
-            if (appPathKey?.GetValue(null) is not string registeredPath)
+            foreach (var registryView in RegistryViews)
             {
-                continue;
-            }
+                string? registeredPath;
+                try
+                {
+                    registeredPath = _registeredPathReader(registryHive, registryView);
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException or SecurityException)
+                {
+                    // A denied or damaged per-user registration must not hide a valid
+                    // machine-wide PowerPoint installation in a later probe.
+                    continue;
+                }
 
-            var expandedPath = Environment.ExpandEnvironmentVariables(registeredPath.Trim().Trim('"'));
-            if (!Path.IsPathFullyQualified(expandedPath) ||
-                !Path.GetFileName(expandedPath).Equals(
-                    "POWERPNT.EXE",
-                    StringComparison.OrdinalIgnoreCase) ||
-                !File.Exists(expandedPath))
-            {
-                continue;
-            }
+                if (registeredPath is null)
+                {
+                    continue;
+                }
 
-            return Path.GetFullPath(expandedPath);
+                var expandedPath = Environment.ExpandEnvironmentVariables(registeredPath.Trim().Trim('"'));
+                if (!Path.IsPathFullyQualified(expandedPath) ||
+                    !Path.GetFileName(expandedPath).Equals(
+                        "POWERPNT.EXE",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !File.Exists(expandedPath))
+                {
+                    continue;
+                }
+
+                return Path.GetFullPath(expandedPath);
+            }
         }
 
         return null;
+    }
+
+    private static string? ReadRegisteredPowerPointPath(
+        RegistryHive registryHive,
+        RegistryView registryView)
+    {
+        using var baseKey = RegistryKey.OpenBaseKey(registryHive, registryView);
+        using var appPathKey = baseKey.OpenSubKey(PowerPointAppPath, writable: false);
+        return appPathKey?.GetValue(null) as string;
     }
 }
 
